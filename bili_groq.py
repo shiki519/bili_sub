@@ -1,0 +1,709 @@
+import argparse
+import glob
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import requests
+
+try:
+    from opencc import OpenCC
+except ImportError:
+    OpenCC = None
+
+try:
+    import imageio_ffmpeg
+except ImportError:
+    imageio_ffmpeg = None
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
+CONFIG_FILE_NAME = "keys.config"
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+TEMP_AUDIO = SCRIPT_DIR / "temp_download.m4a"
+WORK_DIR = SCRIPT_DIR / "temp_chunks"
+TASK_FILE = SCRIPT_DIR / ".current_task_url"
+TITLE_FILE = SCRIPT_DIR / ".current_task_title"
+TEMP_SUB_PREFIX = "temp_sub"
+current_key_index = 0
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Download Bilibili audio and transcribe it with Groq Whisper."
+    )
+    parser.add_argument("url", nargs="?", help="Bilibili video URL")
+    parser.add_argument(
+        "--keys-file",
+        default=str(SCRIPT_DIR / CONFIG_FILE_NAME),
+        help="Path to keys.config",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for txt/pdf output (default: ./output or config/env override)",
+    )
+    parser.add_argument(
+        "--proxy-url",
+        default=None,
+        help="HTTP/HTTPS proxy URL for Groq API requests",
+    )
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Generate a PDF after writing the TXT result",
+    )
+    parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Keep downloaded audio and chunk cache after success",
+    )
+    parser.add_argument(
+        "--skip-native-sub",
+        action="store_true",
+        help="Skip downloading Bilibili native subtitles and go straight to ASR",
+    )
+    parser.add_argument(
+        "--summarize",
+        action="store_true",
+        help="Summarize the generated TXT with DeepSeek after transcription",
+    )
+    parser.add_argument(
+        "--summarize-file",
+        default=None,
+        help="Summarize an existing TXT file with DeepSeek without downloading/transcribing",
+    )
+    return parser.parse_args()
+
+
+def strip_wrapped_quotes(value):
+    value = value.strip()
+    quote_pairs = {
+        "'": "'",
+        '"': '"',
+        "“": "”",
+        "‘": "’",
+    }
+    if len(value) >= 2 and value[0] in quote_pairs and value[-1] == quote_pairs[value[0]]:
+        return value[1:-1]
+    return value
+
+
+def load_runtime_config(config_path):
+    api_keys = []
+    proxy_url = ""
+    output_dir = ""
+    deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL", "").strip()
+    deepseek_model = os.environ.get("DEEPSEEK_MODEL", "").strip()
+    deepseek_prompt_file = os.environ.get("DEEPSEEK_PROMPT_FILE", "").strip()
+
+    env_keys = os.environ.get("BILI_SUB_API_KEYS", "").strip()
+    if env_keys:
+        api_keys.extend([item.strip() for item in env_keys.split(",") if item.strip()])
+
+    env_proxy = os.environ.get("BILI_SUB_PROXY_URL", "").strip()
+    env_output_dir = os.environ.get("BILI_SUB_OUTPUT_DIR", "").strip()
+
+    cfg_path = Path(config_path).expanduser()
+    if cfg_path.exists():
+        for raw_line in cfg_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            match = re.match(r"^([A-Za-z0-9_]+)\s*=\s*(.+)$", line)
+            if not match:
+                continue
+
+            key_name, raw_value = match.groups()
+            value = strip_wrapped_quotes(raw_value)
+
+            if key_name in {"API_KEYS", "API_KEY"} and value:
+                api_keys.append(value)
+            elif key_name == "PROXY_URL" and value:
+                proxy_url = value
+            elif key_name in {"DOWNLOAD_DIR", "OUTPUT_DIR"} and value:
+                output_dir = value
+            elif key_name == "DEEPSEEK_API_KEY" and value:
+                deepseek_api_key = value
+            elif key_name == "DEEPSEEK_BASE_URL" and value:
+                deepseek_base_url = value
+            elif key_name == "DEEPSEEK_MODEL" and value:
+                deepseek_model = value
+            elif key_name == "DEEPSEEK_PROMPT_FILE" and value:
+                deepseek_prompt_file = value
+
+    if env_proxy:
+        proxy_url = env_proxy
+    if env_output_dir:
+        output_dir = env_output_dir
+
+    unique_keys = []
+    seen = set()
+    for item in api_keys:
+        if item not in seen:
+            unique_keys.append(item)
+            seen.add(item)
+
+    return {
+        "api_keys": unique_keys,
+        "proxy_url": proxy_url,
+        "output_dir": output_dir,
+        "deepseek_api_key": deepseek_api_key,
+        "deepseek_base_url": deepseek_base_url or "https://api.deepseek.com",
+        "deepseek_model": deepseek_model or "deepseek-chat",
+        "deepseek_prompt_file": deepseek_prompt_file or "prompts/news_analysis.md",
+    }
+
+
+def get_output_dir(cli_output_dir, config_output_dir):
+    raw_value = cli_output_dir or config_output_dir
+    if raw_value:
+        return Path(raw_value).expanduser().resolve()
+    return DEFAULT_OUTPUT_DIR
+
+
+def resolve_ytdlp_command():
+    binary = shutil.which("yt-dlp")
+    if binary:
+        return [binary]
+    if importlib.util.find_spec("yt_dlp"):
+        return [sys.executable, "-m", "yt_dlp"]
+    raise RuntimeError(
+        "yt-dlp is not installed. Install it with `python -m pip install yt-dlp`."
+    )
+
+
+def build_ytdlp_command(proxy_url=""):
+    cmd = resolve_ytdlp_command() + [
+        "--socket-timeout",
+        "60",
+        "--retries",
+        "3",
+    ]
+    try:
+        ffmpeg_path = resolve_ffmpeg_command()
+        cmd += ["--ffmpeg-location", ffmpeg_path]
+    except RuntimeError:
+        pass
+    if proxy_url:
+        cmd += ["--proxy", proxy_url]
+    return cmd
+
+
+def ensure_command_available(command_name):
+    if shutil.which(command_name):
+        return
+    raise RuntimeError(
+        f"`{command_name}` was not found in PATH. Please install it before running."
+    )
+
+
+def resolve_ffmpeg_command():
+    binary = shutil.which("ffmpeg")
+    if binary:
+        return binary
+    if imageio_ffmpeg is not None:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    raise RuntimeError(
+        "ffmpeg was not found. Install system ffmpeg or `python -m pip install imageio-ffmpeg`."
+    )
+
+
+def run_command(command, capture_output=False, quiet=False):
+    kwargs = {
+        "check": True,
+        "text": True,
+    }
+    if capture_output:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    elif quiet:
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+
+    result = subprocess.run(command, **kwargs)
+    if capture_output:
+        return result.stdout.strip()
+    return ""
+
+
+def wipe_cache(reason, keep_task_file=False):
+    print(f"[cleanup] {reason}")
+    if TEMP_AUDIO.exists():
+        TEMP_AUDIO.unlink()
+    if WORK_DIR.exists():
+        shutil.rmtree(WORK_DIR)
+    for file_path in SCRIPT_DIR.glob(f"{TEMP_SUB_PREFIX}*.srt"):
+        file_path.unlink()
+    if TITLE_FILE.exists():
+        TITLE_FILE.unlink()
+    if not keep_task_file and TASK_FILE.exists():
+        TASK_FILE.unlink()
+
+
+def check_task_consistency(new_url):
+    if not new_url:
+        return
+
+    last_url = ""
+    if TASK_FILE.exists():
+        last_url = TASK_FILE.read_text(encoding="utf-8").strip()
+
+    if last_url and last_url != new_url:
+        wipe_cache("detected a new URL, clearing old cache", keep_task_file=True)
+
+    TASK_FILE.write_text(new_url, encoding="utf-8")
+
+
+def get_current_key(api_keys):
+    return api_keys[current_key_index % len(api_keys)]
+
+
+def rotate_key(api_keys):
+    global current_key_index
+    current_key_index += 1
+    next_index = current_key_index % len(api_keys) + 1
+    print(f"[api] switched to key #{next_index}")
+
+
+def get_video_title(url, proxy_url=""):
+    cmd = build_ytdlp_command(proxy_url) + ["--get-filename", "-o", "%(title)s", url]
+    return run_command(cmd, capture_output=True) or "Unknown_Video"
+
+
+def save_current_title(title):
+    if title and title != "Unknown_Video":
+        TITLE_FILE.write_text(title, encoding="utf-8")
+
+
+def load_cached_title(url="", proxy_url=""):
+    if url:
+        try:
+            title = get_video_title(url, proxy_url)
+            save_current_title(title)
+            return title
+        except Exception:
+            pass
+
+    if TITLE_FILE.exists():
+        title = TITLE_FILE.read_text(encoding="utf-8").strip()
+        if title:
+            return title
+
+    return "Cached_Video"
+
+
+def download_native_sub(url, proxy_url=""):
+    print("[step 1] checking Bilibili native subtitles")
+    for file_path in SCRIPT_DIR.glob(f"{TEMP_SUB_PREFIX}*.srt"):
+        file_path.unlink()
+
+    cmd = build_ytdlp_command(proxy_url) + [
+        "--write-subs",
+        "--skip-download",
+        "--sub-langs",
+        "zh-CN,zh-Hans,ai-zh,en",
+        "--sub-format",
+        "srt",
+        "-o",
+        TEMP_SUB_PREFIX,
+        url,
+    ]
+    try:
+        run_command(cmd, quiet=True)
+    except subprocess.CalledProcessError:
+        return None
+
+    files = sorted(SCRIPT_DIR.glob(f"{TEMP_SUB_PREFIX}*.srt"))
+    return files[0] if files else None
+
+
+def download_audio(url, proxy_url=""):
+    print("[step 2] downloading audio")
+    if TEMP_AUDIO.exists() and TEMP_AUDIO.stat().st_size > 1024:
+        print("[cache] reusing downloaded audio")
+        return TEMP_AUDIO, load_cached_title(url, proxy_url)
+
+    title = get_video_title(url, proxy_url)
+    save_current_title(title)
+    print(f"[video] title: {title}")
+
+    cmd = build_ytdlp_command(proxy_url) + [
+        "-x",
+        "-f",
+        "ba[ext=m4a]/ba/bestaudio",
+        "--audio-format",
+        "m4a",
+        "-o",
+        str(TEMP_AUDIO),
+        url,
+    ]
+    run_command(cmd)
+    if not TEMP_AUDIO.exists():
+        raise RuntimeError("audio download failed")
+    return TEMP_AUDIO, title
+
+
+def compress_and_split(input_file):
+    print("[step 3] preprocessing audio")
+    WORK_DIR.mkdir(exist_ok=True)
+
+    existing_chunks = sorted(WORK_DIR.glob("chunk_*.opus"))
+    if existing_chunks:
+        print(f"[cache] reusing {len(existing_chunks)} chunk(s)")
+        return existing_chunks
+
+    print("[audio] splitting into 10-minute chunks")
+    pattern = WORK_DIR / "chunk_%03d.opus"
+    ffmpeg_cmd = resolve_ffmpeg_command()
+    run_command(
+        [
+            ffmpeg_cmd,
+            "-i",
+            str(input_file),
+            "-f",
+            "segment",
+            "-segment_time",
+            "600",
+            "-reset_timestamps",
+            "1",
+            "-ac",
+            "1",
+            "-b:a",
+            "32k",
+            "-c:a",
+            "libopus",
+            str(pattern),
+            "-y",
+            "-loglevel",
+            "error",
+        ]
+    )
+    return sorted(WORK_DIR.glob("chunk_*.opus"))
+
+
+def call_groq_api(filepath, chunk_index, total_chunks, api_keys, proxy_url):
+    cache_file = filepath.with_suffix(filepath.suffix + ".txt")
+    if cache_file.exists() and cache_file.stat().st_size > 0:
+        print(f"[cache] chunk {chunk_index}/{total_chunks} already transcribed")
+        return cache_file.read_text(encoding="utf-8")
+
+    if not api_keys:
+        raise RuntimeError(
+            "No API key found. Add one or more keys to keys.config with API_KEYS=\"...\"."
+        )
+
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    max_retries = max(5, len(api_keys) * 2)
+    for attempt in range(max_retries):
+        current_key = get_current_key(api_keys)
+        headers = {"Authorization": f"Bearer {current_key}"}
+
+        try:
+            with filepath.open("rb") as audio_file:
+                files = {
+                    "file": (filepath.name, audio_file),
+                    "model": (None, "whisper-large-v3-turbo"),
+                    "language": (None, "zh"),
+                    "prompt": (
+                        None,
+                        "请将这段中文视频音频转写为简体中文，尽量补齐标点。"
+                        "保留人名、地名、机构名、日期和数字。"
+                        "不要加入解释、总结或额外指令。"
+                        "如果音频中出现广告、口播、玩笑或重复句，也按原文转写。",
+                    ),
+                    "response_format": (None, "text"),
+                }
+                print(f"[api] uploading chunk {chunk_index}/{total_chunks}")
+                response = requests.post(
+                    GROQ_URL,
+                    headers=headers,
+                    files=files,
+                    proxies=proxies,
+                    timeout=120,
+                )
+
+            if response.status_code in {401, 403, 429}:
+                if response.status_code == 429:
+                    print("[api] quota hit, rotating key")
+                else:
+                    print(f"[api] key rejected with HTTP {response.status_code}, rotating key")
+                rotate_key(api_keys)
+                time.sleep(2)
+                continue
+
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:120]}")
+
+            text = response.text
+            cache_file.write_text(text, encoding="utf-8")
+            return text
+
+        except Exception as exc:
+            print(f"[api] chunk {chunk_index}/{total_chunks} failed ({attempt + 1}/{max_retries}): {exc}")
+            time.sleep(3)
+
+    raise RuntimeError("All configured API keys failed for this chunk.")
+
+
+def normalize_srt_text(text):
+    lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.isdigit():
+            continue
+        if "-->" in line:
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def simplify_text(text):
+    if OpenCC is None:
+        return text
+    try:
+        return OpenCC("t2s").convert(text)
+    except Exception:
+        return text
+
+
+def sanitize_title(title):
+    safe_title = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff _-]+", "", title).strip()
+    return safe_title or "result_recovered"
+
+
+def convert_and_save(text, title, output_dir):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_title = sanitize_title(title)
+    output_path = output_dir / f"{safe_title}.txt"
+    final_text = simplify_text(text)
+    output_path.write_text(final_text, encoding="utf-8")
+    print(f"[save] txt written to {output_path}")
+    return output_path
+
+
+def maybe_generate_pdf(txt_path):
+    try:
+        from txt2pdf import convert_txt_to_pdf
+    except ImportError as exc:
+        print(f"[pdf] skipped: {exc}")
+        return None
+
+    return convert_txt_to_pdf(str(txt_path))
+
+
+def load_prompt_file(prompt_path):
+    prompt_file = Path(prompt_path).expanduser()
+    if not prompt_file.is_absolute():
+        prompt_file = SCRIPT_DIR / prompt_file
+    prompt_file = prompt_file.resolve()
+
+    if not prompt_file.exists():
+        raise RuntimeError(f"Prompt file not found: {prompt_file}")
+
+    prompt_text = prompt_file.read_text(encoding="utf-8").strip()
+    if not prompt_text:
+        raise RuntimeError(f"Prompt file is empty: {prompt_file}")
+    return prompt_text
+
+
+def preclean_transcript(text):
+    cleaned = text.replace("\ufeff", "").replace("\x00", "")
+    prompt_residue = {
+        "请将这段中文视频音频转写为简体中文，尽量补齐标点。",
+        "保留人名、地名、机构名、日期和数字。",
+        "不要加入解释、总结或额外指令。",
+        "如果音频中出现广告、口播、玩笑或重复句，也按原文转写。",
+    }
+
+    kept_lines = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            kept_lines.append("")
+            continue
+        if line in prompt_residue:
+            continue
+        kept_lines.append(raw_line.rstrip())
+
+    return "\n".join(kept_lines).strip()
+
+
+def call_deepseek_summary(transcript_text, prompt_text, runtime_config):
+    api_key = runtime_config["deepseek_api_key"]
+    if not api_key:
+        raise RuntimeError("No DeepSeek API key found. Set DEEPSEEK_API_KEY in keys.config or environment.")
+
+    base_url = runtime_config["deepseek_base_url"].rstrip("/")
+    request_url = f"{base_url}/chat/completions"
+    proxy_url = runtime_config["proxy_url"]
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": runtime_config["deepseek_model"],
+        "messages": [
+            {
+                "role": "system",
+                "content": prompt_text,
+            },
+            {
+                "role": "user",
+                "content": "以下是视频转写文本，请按照要求分析：\n\n" + transcript_text,
+            },
+        ],
+        "temperature": 0.2,
+        "max_tokens": 8192,
+        "stream": False,
+    }
+
+    print("[summary] sending transcript to DeepSeek")
+    response = requests.post(
+        request_url,
+        headers=headers,
+        json=payload,
+        proxies=proxies,
+        timeout=180,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"DeepSeek HTTP {response.status_code}: {response.text[:200]}")
+
+    try:
+        summary_text = response.json()["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid DeepSeek response: {response.text[:200]}") from exc
+
+    if not summary_text:
+        raise RuntimeError("DeepSeek returned an empty summary.")
+    return summary_text
+
+
+def save_summary(txt_path, summary_text):
+    txt_file = Path(txt_path).expanduser().resolve()
+    summary_path = txt_file.with_suffix(".summary.md")
+    summary_path.write_text(summary_text, encoding="utf-8")
+    print(f"[save] summary written to {summary_path}")
+    return summary_path
+
+
+def summarize_txt_file(txt_path, runtime_config):
+    txt_file = Path(txt_path).expanduser().resolve()
+    if not txt_file.exists():
+        raise RuntimeError(f"TXT file not found: {txt_file}")
+
+    print(f"[summary] reading transcript from {txt_file}")
+    transcript_text = txt_file.read_text(encoding="utf-8")
+    prompt_text = load_prompt_file(runtime_config["deepseek_prompt_file"])
+    cleaned_text = preclean_transcript(transcript_text)
+    summary_text = call_deepseek_summary(cleaned_text, prompt_text, runtime_config)
+    return save_summary(txt_file, summary_text)
+
+
+def validate_dependencies(will_use_native_sub, will_transcribe):
+    if will_use_native_sub or will_transcribe:
+        resolve_ytdlp_command()
+    if will_transcribe:
+        resolve_ffmpeg_command()
+
+
+def main():
+    args = parse_args()
+    runtime_config = load_runtime_config(args.keys_file)
+    output_dir = get_output_dir(args.output_dir, runtime_config["output_dir"])
+    proxy_url = args.proxy_url if args.proxy_url is not None else runtime_config["proxy_url"]
+
+    if args.summarize_file:
+        try:
+            summarize_txt_file(args.summarize_file, runtime_config)
+            return 0
+        except Exception as exc:
+            print(f"[error] {exc}")
+            return 1
+
+    if not args.url and not TEMP_AUDIO.exists():
+        print("Usage: python bili_groq.py <URL> [--pdf]")
+        return 1
+
+    url = args.url or ""
+    title = "Video_Result"
+    generated_txt = None
+
+    if url:
+        check_task_consistency(url)
+
+    try:
+        validate_dependencies(
+            will_use_native_sub=bool(url and not args.skip_native_sub),
+            will_transcribe=bool(url or TEMP_AUDIO.exists()),
+        )
+
+        if url and not args.skip_native_sub:
+            native_sub = download_native_sub(url, proxy_url)
+            if native_sub:
+                title = get_video_title(url, proxy_url)
+                save_current_title(title)
+                raw_text = native_sub.read_text(encoding="utf-8")
+                subtitle_text = normalize_srt_text(raw_text)
+                generated_txt = convert_and_save(subtitle_text or raw_text, title, output_dir)
+                if args.pdf:
+                    maybe_generate_pdf(generated_txt)
+                if args.summarize:
+                    summarize_txt_file(generated_txt, runtime_config)
+                if not args.keep_temp:
+                    wipe_cache("native subtitle path finished")
+                return 0
+
+        if url:
+            _, title = download_audio(url, proxy_url)
+        elif TEMP_AUDIO.exists():
+            print("[step 2] using existing cached audio")
+        else:
+            raise RuntimeError("No URL provided and no cached audio found.")
+
+        chunks = compress_and_split(TEMP_AUDIO)
+        if not chunks:
+            raise RuntimeError("No audio chunks were generated.")
+
+        print(f"[step 4] transcribing {len(chunks)} chunk(s)")
+        final_parts = []
+        for index, chunk in enumerate(chunks, start=1):
+            part_text = call_groq_api(
+                chunk,
+                index,
+                len(chunks),
+                runtime_config["api_keys"],
+                proxy_url,
+            )
+            final_parts.append(part_text)
+
+        generated_txt = convert_and_save("\n".join(final_parts), title, output_dir)
+        if args.pdf:
+            maybe_generate_pdf(generated_txt)
+        if args.summarize:
+            summarize_txt_file(generated_txt, runtime_config)
+
+        if not args.keep_temp:
+            wipe_cache("task finished")
+        return 0
+
+    except Exception as exc:
+        print(f"[error] {exc}")
+        print("[resume] temp files were kept so you can retry the same URL later.")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

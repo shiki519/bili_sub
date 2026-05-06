@@ -1,0 +1,8 @@
+API_KEYS="your_groq_api_key_1"
+API_KEYS="your_groq_api_key_2"
+DEEPSEEK_API_KEY="your_deepseek_api_key"
+DEEPSEEK_BASE_URL="https://api.deepseek.com"
+DEEPSEEK_MODEL="deepseek-v4-pro"
+DEEPSEEK_PROMPT_FILE="prompts/news_analysis.md"
+PROXY_URL=""
+OUTPUT_DIR="./output"
