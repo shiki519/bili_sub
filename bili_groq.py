@@ -97,25 +97,29 @@ def strip_wrapped_quotes(value):
 
 def load_runtime_config(config_path):
     api_keys = []
-    proxy_url = ""
-    output_dir = ""
-    deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL", "").strip()
-    deepseek_model = os.environ.get("DEEPSEEK_MODEL", "").strip()
-    deepseek_prompt_file = os.environ.get("DEEPSEEK_PROMPT_FILE", "").strip()
-    bilibili_cookies = os.environ.get("BILIBILI_COOKIES", "").strip()
-    ytdlp_retries = os.environ.get("YTDLP_RETRIES", "").strip()
-    ytdlp_fragment_retries = os.environ.get("YTDLP_FRAGMENT_RETRIES", "").strip()
-    ytdlp_file_access_retries = os.environ.get("YTDLP_FILE_ACCESS_RETRIES", "").strip()
-    ytdlp_retry_sleep = os.environ.get("YTDLP_RETRY_SLEEP", "").strip()
-    ytdlp_http_chunk_size = os.environ.get("YTDLP_HTTP_CHUNK_SIZE", "").strip()
+    config = {
+        "proxy_url": "",
+        "ytdlp_proxy_url": "",
+        "groq_proxy_url": "",
+        "deepseek_proxy_url": "",
+        "output_dir": "",
+        "deepseek_api_key": "",
+        "deepseek_base_url": "https://api.deepseek.com",
+        "deepseek_model": "deepseek-chat",
+        "deepseek_prompt_file": "prompts/news_analysis.md",
+        "deepseek_retries": "3",
+        "deepseek_timeout": "300",
+        "bilibili_cookies": "",
+        "ytdlp_retries": "10",
+        "ytdlp_fragment_retries": "10",
+        "ytdlp_file_access_retries": "10",
+        "ytdlp_retry_sleep": "2",
+        "ytdlp_http_chunk_size": "512K",
+    }
 
     env_keys = os.environ.get("BILI_SUB_API_KEYS", "").strip()
     if env_keys:
         api_keys.extend([item.strip() for item in env_keys.split(",") if item.strip()])
-
-    env_proxy = os.environ.get("BILI_SUB_PROXY_URL", "").strip()
-    env_output_dir = os.environ.get("BILI_SUB_OUTPUT_DIR", "").strip()
 
     cfg_path = Path(config_path).expanduser()
     if cfg_path.exists():
@@ -133,35 +137,63 @@ def load_runtime_config(config_path):
 
             if key_name in {"API_KEYS", "API_KEY"} and value:
                 api_keys.append(value)
-            elif key_name == "PROXY_URL" and value:
-                proxy_url = value
-            elif key_name in {"DOWNLOAD_DIR", "OUTPUT_DIR"} and value:
-                output_dir = value
-            elif key_name == "DEEPSEEK_API_KEY" and value:
-                deepseek_api_key = value
+            elif key_name == "PROXY_URL":
+                config["proxy_url"] = value
+            elif key_name in {"DOWNLOAD_DIR", "OUTPUT_DIR"}:
+                config["output_dir"] = value
+            elif key_name == "YTDLP_PROXY_URL":
+                config["ytdlp_proxy_url"] = value
+            elif key_name == "GROQ_PROXY_URL":
+                config["groq_proxy_url"] = value
+            elif key_name == "DEEPSEEK_PROXY_URL":
+                config["deepseek_proxy_url"] = value
+            elif key_name == "DEEPSEEK_API_KEY":
+                config["deepseek_api_key"] = value
             elif key_name == "DEEPSEEK_BASE_URL" and value:
-                deepseek_base_url = value
+                config["deepseek_base_url"] = value
             elif key_name == "DEEPSEEK_MODEL" and value:
-                deepseek_model = value
+                config["deepseek_model"] = value
             elif key_name == "DEEPSEEK_PROMPT_FILE" and value:
-                deepseek_prompt_file = value
-            elif key_name == "BILIBILI_COOKIES" and value:
-                bilibili_cookies = value
+                config["deepseek_prompt_file"] = value
+            elif key_name == "DEEPSEEK_RETRIES" and value:
+                config["deepseek_retries"] = value
+            elif key_name == "DEEPSEEK_TIMEOUT" and value:
+                config["deepseek_timeout"] = value
+            elif key_name == "BILIBILI_COOKIES":
+                config["bilibili_cookies"] = value
             elif key_name == "YTDLP_RETRIES" and value:
-                ytdlp_retries = value
+                config["ytdlp_retries"] = value
             elif key_name == "YTDLP_FRAGMENT_RETRIES" and value:
-                ytdlp_fragment_retries = value
+                config["ytdlp_fragment_retries"] = value
             elif key_name == "YTDLP_FILE_ACCESS_RETRIES" and value:
-                ytdlp_file_access_retries = value
+                config["ytdlp_file_access_retries"] = value
             elif key_name == "YTDLP_RETRY_SLEEP" and value:
-                ytdlp_retry_sleep = value
+                config["ytdlp_retry_sleep"] = value
             elif key_name == "YTDLP_HTTP_CHUNK_SIZE" and value:
-                ytdlp_http_chunk_size = value
+                config["ytdlp_http_chunk_size"] = value
 
-    if env_proxy:
-        proxy_url = env_proxy
-    if env_output_dir:
-        output_dir = env_output_dir
+    env_overrides = {
+        "BILI_SUB_PROXY_URL": "proxy_url",
+        "BILI_SUB_OUTPUT_DIR": "output_dir",
+        "YTDLP_PROXY_URL": "ytdlp_proxy_url",
+        "GROQ_PROXY_URL": "groq_proxy_url",
+        "DEEPSEEK_PROXY_URL": "deepseek_proxy_url",
+        "DEEPSEEK_API_KEY": "deepseek_api_key",
+        "DEEPSEEK_BASE_URL": "deepseek_base_url",
+        "DEEPSEEK_MODEL": "deepseek_model",
+        "DEEPSEEK_PROMPT_FILE": "deepseek_prompt_file",
+        "DEEPSEEK_RETRIES": "deepseek_retries",
+        "DEEPSEEK_TIMEOUT": "deepseek_timeout",
+        "BILIBILI_COOKIES": "bilibili_cookies",
+        "YTDLP_RETRIES": "ytdlp_retries",
+        "YTDLP_FRAGMENT_RETRIES": "ytdlp_fragment_retries",
+        "YTDLP_FILE_ACCESS_RETRIES": "ytdlp_file_access_retries",
+        "YTDLP_RETRY_SLEEP": "ytdlp_retry_sleep",
+        "YTDLP_HTTP_CHUNK_SIZE": "ytdlp_http_chunk_size",
+    }
+    for env_name, config_key in env_overrides.items():
+        if env_name in os.environ:
+            config[config_key] = os.environ[env_name].strip()
 
     unique_keys = []
     seen = set()
@@ -172,18 +204,7 @@ def load_runtime_config(config_path):
 
     return {
         "api_keys": unique_keys,
-        "proxy_url": proxy_url,
-        "output_dir": output_dir,
-        "deepseek_api_key": deepseek_api_key,
-        "deepseek_base_url": deepseek_base_url or "https://api.deepseek.com",
-        "deepseek_model": deepseek_model or "deepseek-chat",
-        "deepseek_prompt_file": deepseek_prompt_file or "prompts/news_analysis.md",
-        "bilibili_cookies": bilibili_cookies,
-        "ytdlp_retries": ytdlp_retries or "10",
-        "ytdlp_fragment_retries": ytdlp_fragment_retries or "10",
-        "ytdlp_file_access_retries": ytdlp_file_access_retries or "10",
-        "ytdlp_retry_sleep": ytdlp_retry_sleep or "2",
-        "ytdlp_http_chunk_size": ytdlp_http_chunk_size or "512K",
+        **config,
     }
 
 
@@ -214,7 +235,9 @@ def resolve_optional_path(raw_path):
     return path.resolve()
 
 
-def build_ytdlp_command(runtime_config, proxy_url="", needs_cookies=False):
+def build_ytdlp_command(runtime_config, needs_cookies=False):
+    ytdlp_proxy_url = runtime_config["ytdlp_proxy_url"] or runtime_config["proxy_url"]
+    print(f"[ytdlp] proxy: {ytdlp_proxy_url or 'direct'}")
     cmd = resolve_ytdlp_command() + [
         "--socket-timeout",
         "60",
@@ -247,8 +270,8 @@ def build_ytdlp_command(runtime_config, proxy_url="", needs_cookies=False):
     elif needs_cookies or runtime_config["bilibili_cookies"]:
         print("[warn] BILIBILI_COOKIES not found or unreadable, continue without cookies")
 
-    if proxy_url:
-        cmd += ["--proxy", proxy_url]
+    if ytdlp_proxy_url:
+        cmd += ["--proxy", ytdlp_proxy_url]
     return cmd
 
 
@@ -328,8 +351,8 @@ def rotate_key(api_keys):
     print(f"[api] switched to key #{next_index}")
 
 
-def get_video_title(url, runtime_config, proxy_url=""):
-    cmd = build_ytdlp_command(runtime_config, proxy_url, needs_cookies=True) + [
+def get_video_title(url, runtime_config):
+    cmd = build_ytdlp_command(runtime_config, needs_cookies=True) + [
         "--get-filename",
         "-o",
         "%(title)s",
@@ -343,10 +366,10 @@ def save_current_title(title):
         TITLE_FILE.write_text(title, encoding="utf-8")
 
 
-def load_cached_title(runtime_config, url="", proxy_url=""):
+def load_cached_title(runtime_config, url=""):
     if url:
         try:
-            title = get_video_title(url, runtime_config, proxy_url)
+            title = get_video_title(url, runtime_config)
             save_current_title(title)
             return title
         except Exception:
@@ -360,12 +383,12 @@ def load_cached_title(runtime_config, url="", proxy_url=""):
     return "Cached_Video"
 
 
-def download_native_sub(url, runtime_config, proxy_url=""):
+def download_native_sub(url, runtime_config):
     print("[step 1] checking Bilibili native subtitles")
     for file_path in SCRIPT_DIR.glob(f"{TEMP_SUB_PREFIX}*.srt"):
         file_path.unlink()
 
-    cmd = build_ytdlp_command(runtime_config, proxy_url, needs_cookies=True) + [
+    cmd = build_ytdlp_command(runtime_config, needs_cookies=True) + [
         "--write-subs",
         "--skip-download",
         "--sub-langs",
@@ -385,17 +408,17 @@ def download_native_sub(url, runtime_config, proxy_url=""):
     return files[0] if files else None
 
 
-def download_audio(url, runtime_config, proxy_url=""):
+def download_audio(url, runtime_config):
     print("[step 2] downloading audio")
     if TEMP_AUDIO.exists() and TEMP_AUDIO.stat().st_size > 1024:
         print("[cache] reusing downloaded audio")
-        return TEMP_AUDIO, load_cached_title(runtime_config, url, proxy_url)
+        return TEMP_AUDIO, load_cached_title(runtime_config, url)
 
-    title = get_video_title(url, runtime_config, proxy_url)
+    title = get_video_title(url, runtime_config)
     save_current_title(title)
     print(f"[video] title: {title}")
 
-    cmd = build_ytdlp_command(runtime_config, proxy_url, needs_cookies=True) + [
+    cmd = build_ytdlp_command(runtime_config, needs_cookies=True) + [
         "-x",
         "-f",
         "ba[ext=m4a]/ba/bestaudio",
@@ -449,7 +472,7 @@ def compress_and_split(input_file):
     return sorted(WORK_DIR.glob("chunk_*.opus"))
 
 
-def call_groq_api(filepath, chunk_index, total_chunks, api_keys, proxy_url):
+def call_groq_api(filepath, chunk_index, total_chunks, api_keys, runtime_config):
     cache_file = filepath.with_suffix(filepath.suffix + ".txt")
     if cache_file.exists() and cache_file.stat().st_size > 0:
         print(f"[cache] chunk {chunk_index}/{total_chunks} already transcribed")
@@ -460,13 +483,15 @@ def call_groq_api(filepath, chunk_index, total_chunks, api_keys, proxy_url):
             "No API key found. Add one or more keys to keys.config with API_KEYS=\"...\"."
         )
 
-    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    groq_proxy_url = runtime_config["groq_proxy_url"] or runtime_config["proxy_url"]
+    proxies = {"http": groq_proxy_url, "https": groq_proxy_url} if groq_proxy_url else None
     max_retries = max(5, len(api_keys) * 2)
     for attempt in range(max_retries):
         current_key = get_current_key(api_keys)
         headers = {"Authorization": f"Bearer {current_key}"}
 
         try:
+            print(f"[api] Groq proxy: {groq_proxy_url or 'direct'}")
             with filepath.open("rb") as audio_file:
                 files = {
                     "file": (filepath.name, audio_file),
@@ -491,6 +516,8 @@ def call_groq_api(filepath, chunk_index, total_chunks, api_keys, proxy_url):
                 )
 
             if response.status_code in {401, 403, 429}:
+                body_preview = (response.text or "")[:300].replace("\n", " ")
+                print(f"[api] HTTP {response.status_code}: {body_preview}")
                 if response.status_code == 429:
                     print("[api] quota hit, rotating key")
                 else:
@@ -605,8 +632,8 @@ def call_deepseek_summary(transcript_text, prompt_text, runtime_config):
 
     base_url = runtime_config["deepseek_base_url"].rstrip("/")
     request_url = f"{base_url}/chat/completions"
-    proxy_url = runtime_config["proxy_url"]
-    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    deepseek_proxy_url = runtime_config["deepseek_proxy_url"]
+    proxies = {"http": deepseek_proxy_url, "https": deepseek_proxy_url} if deepseek_proxy_url else None
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -628,26 +655,62 @@ def call_deepseek_summary(transcript_text, prompt_text, runtime_config):
         "max_tokens": 8192,
         "stream": False,
     }
+    max_retries = max(1, int(runtime_config["deepseek_retries"]))
+    timeout_seconds = max(30, int(runtime_config["deepseek_timeout"]))
+    last_error = ""
 
-    print("[summary] sending transcript to DeepSeek")
-    response = requests.post(
-        request_url,
-        headers=headers,
-        json=payload,
-        proxies=proxies,
-        timeout=180,
-    )
-    if response.status_code != 200:
-        raise RuntimeError(f"DeepSeek HTTP {response.status_code}: {response.text[:200]}")
+    for attempt in range(max_retries):
+        attempt_number = attempt + 1
+        print(f"[summary] DeepSeek attempt {attempt_number}/{max_retries}")
+        print(
+            f"[summary] sending transcript to DeepSeek model={runtime_config['deepseek_model']} "
+            f"proxy={deepseek_proxy_url or 'direct'}"
+        )
+        try:
+            response = requests.post(
+                request_url,
+                headers=headers,
+                json=payload,
+                proxies=proxies,
+                timeout=timeout_seconds,
+            )
 
-    try:
-        summary_text = response.json()["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"Invalid DeepSeek response: {response.text[:200]}") from exc
+            if response.status_code in {502, 503, 504}:
+                raise RuntimeError(f"DeepSeek HTTP {response.status_code}: {(response.text or '')[:200]}")
 
-    if not summary_text:
-        raise RuntimeError("DeepSeek returned an empty summary.")
-    return summary_text
+            if response.status_code != 200:
+                raise RuntimeError(f"DeepSeek HTTP {response.status_code}: {(response.text or '')[:200]}")
+
+            try:
+                summary_text = response.json()["choices"][0]["message"]["content"].strip()
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"Invalid DeepSeek response: {(response.text or '')[:200]}") from exc
+
+            if not summary_text:
+                raise RuntimeError("DeepSeek returned an empty summary.")
+            return summary_text
+
+        except (
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.Timeout,
+        ) as exc:
+            last_error = str(exc)
+        except RuntimeError as exc:
+            last_error = str(exc)
+            if "Response ended prematurely" not in last_error and not any(
+                code in last_error for code in ("HTTP 502", "HTTP 503", "HTTP 504")
+            ):
+                raise
+
+        print(f"[summary] attempt {attempt_number} failed: {last_error}")
+        if attempt_number < max_retries:
+            sleep_seconds = min(5 * (2 ** attempt), 30)
+            print(f"[summary] retrying in {sleep_seconds}s")
+            time.sleep(sleep_seconds)
+
+    raise RuntimeError(f"DeepSeek summary failed after {max_retries} attempts: {last_error}")
 
 
 def save_summary(txt_path, summary_text):
@@ -682,7 +745,8 @@ def main():
     args = parse_args()
     runtime_config = load_runtime_config(args.keys_file)
     output_dir = get_output_dir(args.output_dir, runtime_config["output_dir"])
-    proxy_url = args.proxy_url if args.proxy_url is not None else runtime_config["proxy_url"]
+    if args.proxy_url is not None:
+        runtime_config["proxy_url"] = args.proxy_url
 
     if args.summarize_file:
         try:
@@ -710,9 +774,9 @@ def main():
         )
 
         if url and not args.skip_native_sub:
-            native_sub = download_native_sub(url, runtime_config, proxy_url)
+            native_sub = download_native_sub(url, runtime_config)
             if native_sub:
-                title = get_video_title(url, runtime_config, proxy_url)
+                title = get_video_title(url, runtime_config)
                 save_current_title(title)
                 raw_text = native_sub.read_text(encoding="utf-8")
                 subtitle_text = normalize_srt_text(raw_text)
@@ -726,7 +790,7 @@ def main():
                 return 0
 
         if url:
-            _, title = download_audio(url, runtime_config, proxy_url)
+            _, title = download_audio(url, runtime_config)
         elif TEMP_AUDIO.exists():
             print("[step 2] using existing cached audio")
         else:
@@ -744,7 +808,7 @@ def main():
                 index,
                 len(chunks),
                 runtime_config["api_keys"],
-                proxy_url,
+                runtime_config,
             )
             final_parts.append(part_text)
 
