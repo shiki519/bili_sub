@@ -103,6 +103,12 @@ def load_runtime_config(config_path):
     deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL", "").strip()
     deepseek_model = os.environ.get("DEEPSEEK_MODEL", "").strip()
     deepseek_prompt_file = os.environ.get("DEEPSEEK_PROMPT_FILE", "").strip()
+    bilibili_cookies = os.environ.get("BILIBILI_COOKIES", "").strip()
+    ytdlp_retries = os.environ.get("YTDLP_RETRIES", "").strip()
+    ytdlp_fragment_retries = os.environ.get("YTDLP_FRAGMENT_RETRIES", "").strip()
+    ytdlp_file_access_retries = os.environ.get("YTDLP_FILE_ACCESS_RETRIES", "").strip()
+    ytdlp_retry_sleep = os.environ.get("YTDLP_RETRY_SLEEP", "").strip()
+    ytdlp_http_chunk_size = os.environ.get("YTDLP_HTTP_CHUNK_SIZE", "").strip()
 
     env_keys = os.environ.get("BILI_SUB_API_KEYS", "").strip()
     if env_keys:
@@ -139,6 +145,18 @@ def load_runtime_config(config_path):
                 deepseek_model = value
             elif key_name == "DEEPSEEK_PROMPT_FILE" and value:
                 deepseek_prompt_file = value
+            elif key_name == "BILIBILI_COOKIES" and value:
+                bilibili_cookies = value
+            elif key_name == "YTDLP_RETRIES" and value:
+                ytdlp_retries = value
+            elif key_name == "YTDLP_FRAGMENT_RETRIES" and value:
+                ytdlp_fragment_retries = value
+            elif key_name == "YTDLP_FILE_ACCESS_RETRIES" and value:
+                ytdlp_file_access_retries = value
+            elif key_name == "YTDLP_RETRY_SLEEP" and value:
+                ytdlp_retry_sleep = value
+            elif key_name == "YTDLP_HTTP_CHUNK_SIZE" and value:
+                ytdlp_http_chunk_size = value
 
     if env_proxy:
         proxy_url = env_proxy
@@ -160,6 +178,12 @@ def load_runtime_config(config_path):
         "deepseek_base_url": deepseek_base_url or "https://api.deepseek.com",
         "deepseek_model": deepseek_model or "deepseek-chat",
         "deepseek_prompt_file": deepseek_prompt_file or "prompts/news_analysis.md",
+        "bilibili_cookies": bilibili_cookies,
+        "ytdlp_retries": ytdlp_retries or "10",
+        "ytdlp_fragment_retries": ytdlp_fragment_retries or "10",
+        "ytdlp_file_access_retries": ytdlp_file_access_retries or "10",
+        "ytdlp_retry_sleep": ytdlp_retry_sleep or "2",
+        "ytdlp_http_chunk_size": ytdlp_http_chunk_size or "512K",
     }
 
 
@@ -181,18 +205,48 @@ def resolve_ytdlp_command():
     )
 
 
-def build_ytdlp_command(proxy_url=""):
+def resolve_optional_path(raw_path):
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = SCRIPT_DIR / path
+    return path.resolve()
+
+
+def build_ytdlp_command(runtime_config, proxy_url="", needs_cookies=False):
     cmd = resolve_ytdlp_command() + [
         "--socket-timeout",
         "60",
+        "--continue",
         "--retries",
-        "3",
+        str(runtime_config["ytdlp_retries"]),
+        "--fragment-retries",
+        str(runtime_config["ytdlp_fragment_retries"]),
+        "--file-access-retries",
+        str(runtime_config["ytdlp_file_access_retries"]),
+        "--retry-sleep",
+        str(runtime_config["ytdlp_retry_sleep"]),
+        "--http-chunk-size",
+        str(runtime_config["ytdlp_http_chunk_size"]),
+        "--add-header",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        "--add-header",
+        "Referer: https://www.bilibili.com/",
     ]
     try:
         ffmpeg_path = resolve_ffmpeg_command()
         cmd += ["--ffmpeg-location", ffmpeg_path]
     except RuntimeError:
         pass
+
+    cookies_path = resolve_optional_path(runtime_config["bilibili_cookies"])
+    if cookies_path and cookies_path.is_file() and os.access(cookies_path, os.R_OK):
+        print(f"[info] using Bilibili cookies file: {cookies_path}")
+        cmd += ["--cookies", str(cookies_path)]
+    elif needs_cookies or runtime_config["bilibili_cookies"]:
+        print("[warn] BILIBILI_COOKIES not found or unreadable, continue without cookies")
+
     if proxy_url:
         cmd += ["--proxy", proxy_url]
     return cmd
@@ -274,8 +328,13 @@ def rotate_key(api_keys):
     print(f"[api] switched to key #{next_index}")
 
 
-def get_video_title(url, proxy_url=""):
-    cmd = build_ytdlp_command(proxy_url) + ["--get-filename", "-o", "%(title)s", url]
+def get_video_title(url, runtime_config, proxy_url=""):
+    cmd = build_ytdlp_command(runtime_config, proxy_url, needs_cookies=True) + [
+        "--get-filename",
+        "-o",
+        "%(title)s",
+        url,
+    ]
     return run_command(cmd, capture_output=True) or "Unknown_Video"
 
 
@@ -284,10 +343,10 @@ def save_current_title(title):
         TITLE_FILE.write_text(title, encoding="utf-8")
 
 
-def load_cached_title(url="", proxy_url=""):
+def load_cached_title(runtime_config, url="", proxy_url=""):
     if url:
         try:
-            title = get_video_title(url, proxy_url)
+            title = get_video_title(url, runtime_config, proxy_url)
             save_current_title(title)
             return title
         except Exception:
@@ -301,12 +360,12 @@ def load_cached_title(url="", proxy_url=""):
     return "Cached_Video"
 
 
-def download_native_sub(url, proxy_url=""):
+def download_native_sub(url, runtime_config, proxy_url=""):
     print("[step 1] checking Bilibili native subtitles")
     for file_path in SCRIPT_DIR.glob(f"{TEMP_SUB_PREFIX}*.srt"):
         file_path.unlink()
 
-    cmd = build_ytdlp_command(proxy_url) + [
+    cmd = build_ytdlp_command(runtime_config, proxy_url, needs_cookies=True) + [
         "--write-subs",
         "--skip-download",
         "--sub-langs",
@@ -326,17 +385,17 @@ def download_native_sub(url, proxy_url=""):
     return files[0] if files else None
 
 
-def download_audio(url, proxy_url=""):
+def download_audio(url, runtime_config, proxy_url=""):
     print("[step 2] downloading audio")
     if TEMP_AUDIO.exists() and TEMP_AUDIO.stat().st_size > 1024:
         print("[cache] reusing downloaded audio")
-        return TEMP_AUDIO, load_cached_title(url, proxy_url)
+        return TEMP_AUDIO, load_cached_title(runtime_config, url, proxy_url)
 
-    title = get_video_title(url, proxy_url)
+    title = get_video_title(url, runtime_config, proxy_url)
     save_current_title(title)
     print(f"[video] title: {title}")
 
-    cmd = build_ytdlp_command(proxy_url) + [
+    cmd = build_ytdlp_command(runtime_config, proxy_url, needs_cookies=True) + [
         "-x",
         "-f",
         "ba[ext=m4a]/ba/bestaudio",
@@ -651,9 +710,9 @@ def main():
         )
 
         if url and not args.skip_native_sub:
-            native_sub = download_native_sub(url, proxy_url)
+            native_sub = download_native_sub(url, runtime_config, proxy_url)
             if native_sub:
-                title = get_video_title(url, proxy_url)
+                title = get_video_title(url, runtime_config, proxy_url)
                 save_current_title(title)
                 raw_text = native_sub.read_text(encoding="utf-8")
                 subtitle_text = normalize_srt_text(raw_text)
@@ -667,7 +726,7 @@ def main():
                 return 0
 
         if url:
-            _, title = download_audio(url, proxy_url)
+            _, title = download_audio(url, runtime_config, proxy_url)
         elif TEMP_AUDIO.exists():
             print("[step 2] using existing cached audio")
         else:

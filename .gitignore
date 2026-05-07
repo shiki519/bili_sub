@@ -9,6 +9,9 @@ temp_chunks/
 temp_sub*.srt
 temp_download.m4a
 temp_download.m4a.part
+temp_download.*
+bilibili.txt
+*.part
 *.opus
 *.opus.txt
 

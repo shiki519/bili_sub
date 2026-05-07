@@ -1,8 +1,25 @@
-API_KEYS="your_groq_api_key_1"
-API_KEYS="your_groq_api_key_2"
+# Groq API keys, comma-separated if multiple
+API_KEYS="your_groq_api_key_here"
+
+# Output directory
+OUTPUT_DIR="./output"
+
+# Optional proxy, e.g. http://127.0.0.1:7890
+PROXY_URL=""
+
+# Optional Bilibili cookies file.
+# Export cookies in Netscape format and save as bilibili.txt.
+BILIBILI_COOKIES="./bilibili.txt"
+
+# yt-dlp retry/download stability options
+YTDLP_RETRIES=10
+YTDLP_FRAGMENT_RETRIES=10
+YTDLP_FILE_ACCESS_RETRIES=10
+YTDLP_RETRY_SLEEP=2
+YTDLP_HTTP_CHUNK_SIZE="512K"
+
+# DeepSeek summary options
 DEEPSEEK_API_KEY="your_deepseek_api_key"
 DEEPSEEK_BASE_URL="https://api.deepseek.com"
-DEEPSEEK_MODEL="deepseek-v4-pro"
+DEEPSEEK_MODEL="deepseek-chat"
 DEEPSEEK_PROMPT_FILE="prompts/news_analysis.md"
-PROXY_URL=""
-OUTPUT_DIR="./output"

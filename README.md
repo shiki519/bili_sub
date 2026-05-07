@@ -23,10 +23,44 @@ API_KEYS="your_first_key"
 API_KEYS="your_second_key"
 PROXY_URL="http://127.0.0.1:7890"
 OUTPUT_DIR="./output"
+BILIBILI_COOKIES="./bilibili.txt"
 ```
 
 `PROXY_URL` will be used for both `yt-dlp` and Groq API requests.
 You can start from `keys.config.example` and fill in your own keys locally.
+
+## Bilibili Stability
+
+Tencent Cloud Hong Kong servers may hit Bilibili `412` checks or mid-download interruptions while fetching audio.
+
+- `412` usually means you need valid Bilibili cookies.
+- Export cookies in Netscape format and save them as `bilibili.txt`.
+- Then set this in `keys.config`:
+
+```ini
+BILIBILI_COOKIES="./bilibili.txt"
+```
+
+For Bilibili requests, the script now passes explicit request headers and these stability options to `yt-dlp`:
+
+```bash
+--continue
+--retries 10
+--fragment-retries 10
+--file-access-retries 10
+--retry-sleep 2
+--http-chunk-size 512K
+```
+
+You can override those defaults in `keys.config` with:
+
+```ini
+YTDLP_RETRIES=10
+YTDLP_FRAGMENT_RETRIES=10
+YTDLP_FILE_ACCESS_RETRIES=10
+YTDLP_RETRY_SLEEP=2
+YTDLP_HTTP_CHUNK_SIZE="512K"
+```
 
 ## Python dependencies
 
@@ -51,7 +85,7 @@ Windows:
 Linux/cloud:
 
 ```bash
-chmod +x auto_sub.sh auto_sub_simple.sh
+chmod +x auto_sub.sh
 ./auto_sub.sh "https://www.bilibili.com/video/BV..."
 ./auto_sub.sh "https://www.bilibili.com/video/BV..." --summarize
 ```
