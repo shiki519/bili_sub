@@ -1,15 +1,18 @@
 import argparse
 import glob
 import importlib.util
+from http.cookiejar import MozillaCookieJar
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+from urllib.parse import parse_qs, quote, urlparse
 from pathlib import Path
 
 import requests
+from yt_dlp.cookies import extract_cookies_from_browser
 
 try:
     from opencc import OpenCC
@@ -32,6 +35,11 @@ TASK_FILE = SCRIPT_DIR / ".current_task_url"
 TITLE_FILE = SCRIPT_DIR / ".current_task_title"
 TEMP_SUB_PREFIX = "temp_sub"
 current_key_index = 0
+YTDLP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+)
+YTDLP_REFERER = "https://www.bilibili.com/"
 ASR_PROMPT_LINES = (
     "请将这段中文视频音频转写为简体中文，尽量补齐标点。",
     "保留人名、地名、机构名、日期和数字。",
@@ -102,6 +110,16 @@ def parse_args():
         default=None,
         help="Title to use with --transcribe-file",
     )
+    parser.add_argument(
+        "--check-bilibili-login",
+        action="store_true",
+        help="Check whether configured Bilibili cookies are logged in",
+    )
+    parser.add_argument(
+        "--require-login",
+        action="store_true",
+        help="Return non-zero with --check-bilibili-login when cookies are not logged in",
+    )
     return parser.parse_args()
 
 
@@ -133,6 +151,7 @@ def load_runtime_config(config_path):
         "deepseek_retries": "3",
         "deepseek_timeout": "300",
         "bilibili_cookies": "",
+        "bilibili_cookies_from_browser": "",
         "ytdlp_audio_format": "30216/30232/30280/ba[ext=m4a]/ba/bestaudio",
         "ytdlp_retries": "30",
         "ytdlp_fragment_retries": "30",
@@ -185,6 +204,8 @@ def load_runtime_config(config_path):
                 config["deepseek_timeout"] = value
             elif key_name == "BILIBILI_COOKIES":
                 config["bilibili_cookies"] = value
+            elif key_name == "BILIBILI_COOKIES_FROM_BROWSER":
+                config["bilibili_cookies_from_browser"] = value
             elif key_name == "YTDLP_AUDIO_FORMAT" and value:
                 config["ytdlp_audio_format"] = value
             elif key_name == "YTDLP_RETRIES" and value:
@@ -213,6 +234,7 @@ def load_runtime_config(config_path):
         "DEEPSEEK_RETRIES": "deepseek_retries",
         "DEEPSEEK_TIMEOUT": "deepseek_timeout",
         "BILIBILI_COOKIES": "bilibili_cookies",
+        "BILIBILI_COOKIES_FROM_BROWSER": "bilibili_cookies_from_browser",
         "YTDLP_AUDIO_FORMAT": "ytdlp_audio_format",
         "YTDLP_RETRIES": "ytdlp_retries",
         "YTDLP_FRAGMENT_RETRIES": "ytdlp_fragment_retries",
@@ -264,6 +286,16 @@ def resolve_optional_path(raw_path):
     return path.resolve()
 
 
+def parse_browser_cookie_source(value):
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return "", None
+    if ":" in raw_value:
+        browser_name, profile = raw_value.split(":", 1)
+        return browser_name.strip(), profile.strip() or None
+    return raw_value, None
+
+
 def build_ytdlp_command(runtime_config, needs_cookies=False):
     ytdlp_proxy_url = runtime_config["ytdlp_proxy_url"] or runtime_config["proxy_url"]
     print(f"[ytdlp] proxy: {ytdlp_proxy_url or 'direct'}")
@@ -282,9 +314,9 @@ def build_ytdlp_command(runtime_config, needs_cookies=False):
         "--http-chunk-size",
         str(runtime_config["ytdlp_http_chunk_size"]),
         "--add-header",
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        f"User-Agent: {YTDLP_USER_AGENT}",
         "--add-header",
-        "Referer: https://www.bilibili.com/",
+        f"Referer: {YTDLP_REFERER}",
     ]
     try:
         ffmpeg_path = resolve_ffmpeg_command()
@@ -292,12 +324,20 @@ def build_ytdlp_command(runtime_config, needs_cookies=False):
     except RuntimeError:
         pass
 
-    cookies_path = resolve_optional_path(runtime_config["bilibili_cookies"])
-    if cookies_path and cookies_path.is_file() and os.access(cookies_path, os.R_OK):
-        print(f"[info] using Bilibili cookies file: {cookies_path}")
-        cmd += ["--cookies", str(cookies_path)]
-    elif needs_cookies or runtime_config["bilibili_cookies"]:
-        print("[warn] BILIBILI_COOKIES not found or unreadable, continue without cookies")
+    browser_name, browser_profile = parse_browser_cookie_source(
+        runtime_config.get("bilibili_cookies_from_browser")
+    )
+    if browser_name:
+        browser_spec = browser_name if not browser_profile else f"{browser_name}:{browser_profile}"
+        print(f"[info] using Bilibili cookies from browser: {browser_spec}")
+        cmd += ["--cookies-from-browser", browser_spec]
+    else:
+        cookies_path = resolve_optional_path(runtime_config["bilibili_cookies"])
+        if cookies_path and cookies_path.is_file() and os.access(cookies_path, os.R_OK):
+            print(f"[info] using Bilibili cookies file: {cookies_path}")
+            cmd += ["--cookies", str(cookies_path)]
+        elif needs_cookies or runtime_config["bilibili_cookies"]:
+            print("[warn] BILIBILI_COOKIES not found or unreadable, continue without cookies")
 
     if ytdlp_proxy_url:
         cmd += ["--proxy", ytdlp_proxy_url]
@@ -345,6 +385,9 @@ def wipe_cache(reason, keep_task_file=False):
     print(f"[cleanup] {reason}")
     if TEMP_AUDIO.exists():
         TEMP_AUDIO.unlink()
+    temp_audio_part = TEMP_AUDIO.with_suffix(TEMP_AUDIO.suffix + ".part")
+    if temp_audio_part.exists():
+        temp_audio_part.unlink()
     if WORK_DIR.exists():
         shutil.rmtree(WORK_DIR)
     for file_path in SCRIPT_DIR.glob(f"{TEMP_SUB_PREFIX}*.srt"):
@@ -381,6 +424,9 @@ def rotate_key(api_keys):
 
 
 def get_video_title(url, runtime_config):
+    api_title = get_bilibili_title_from_view(url, runtime_config)
+    if api_title:
+        return api_title
     cmd = build_ytdlp_command(runtime_config, needs_cookies=True) + [
         "--get-filename",
         "-o",
@@ -418,8 +464,547 @@ def load_cached_title(runtime_config, url=""):
     return "Cached_Video"
 
 
+def make_bilibili_session(runtime_config):
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": YTDLP_USER_AGENT,
+            "Referer": YTDLP_REFERER,
+            "Origin": "https://www.bilibili.com",
+            "Accept": "application/json, text/plain, */*",
+        }
+    )
+
+    cookies_path = resolve_optional_path(runtime_config["bilibili_cookies"])
+    if cookies_path and cookies_path.is_file() and os.access(cookies_path, os.R_OK):
+        print(f"[info] using Bilibili cookies file: {cookies_path}")
+        jar = MozillaCookieJar()
+        try:
+            jar.load(str(cookies_path), ignore_discard=True, ignore_expires=True)
+            for cookie in jar:
+                session.cookies.set(
+                    cookie.name,
+                    cookie.value,
+                    domain=cookie.domain,
+                    path=cookie.path,
+                )
+        except Exception as exc:
+            print(f"[warn] failed to load Bilibili cookies: {exc}")
+    elif runtime_config["bilibili_cookies"]:
+        print("[warn] BILIBILI_COOKIES not found or unreadable, continue without cookies")
+
+    browser_name, browser_profile = parse_browser_cookie_source(
+        runtime_config.get("bilibili_cookies_from_browser")
+    )
+    if browser_name:
+        browser_spec = browser_name if not browser_profile else f"{browser_name}:{browser_profile}"
+        print(f"[info] using Bilibili cookies from browser: {browser_spec}")
+        try:
+            browser_jar = extract_cookies_from_browser(browser_name, profile=browser_profile)
+            for cookie in browser_jar:
+                if "bilibili.com" not in (cookie.domain or "") and "hdslb.com" not in (cookie.domain or ""):
+                    continue
+                session.cookies.set(
+                    cookie.name,
+                    cookie.value,
+                    domain=cookie.domain,
+                    path=cookie.path,
+                )
+        except Exception as exc:
+            print(f"[warn] failed to load Bilibili cookies from browser: {exc}")
+
+    return session
+
+
+def request_bilibili_json(session, url, timeout=20):
+    response = session.get(url, timeout=timeout)
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid JSON from Bilibili: {url}") from exc
+
+
+def check_bilibili_login_status(runtime_config):
+    session = make_bilibili_session(runtime_config)
+    payload = request_bilibili_json(
+        session,
+        "https://api.bilibili.com/x/web-interface/nav",
+        timeout=20,
+    )
+
+    data = payload.get("data") or {}
+    nav_code = payload.get("code")
+    is_login = bool(data.get("isLogin"))
+    message = StringOrEmpty(payload.get("message"))
+    uname = StringOrEmpty(data.get("uname"))
+
+    if not message:
+        message = "ok" if nav_code == 0 else "unknown"
+
+    return {
+        "nav_code": nav_code,
+        "is_login": is_login,
+        "message": message,
+        "uname": uname,
+    }
+
+
+def extract_bvid_and_page(url):
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        parsed = None
+
+    bvid = ""
+    if parsed:
+        path_match = re.search(r"/(BV[0-9A-Za-z]+)", parsed.path or "")
+        if path_match:
+            bvid = path_match.group(1)
+        if not bvid:
+            bvid = StringOrEmpty(parsed.query and parse_qs(parsed.query).get("bvid", [""])[0])
+
+        query = parse_qs(parsed.query or "")
+        page_raw = StringOrEmpty(query.get("p", ["1"])[0])
+    else:
+        page_raw = "1"
+
+    if not bvid:
+        match = re.search(r"(BV[0-9A-Za-z]+)", url)
+        if match:
+            bvid = match.group(1)
+
+    try:
+        page_index = int(page_raw)
+    except Exception:
+        page_index = 1
+
+    if page_index <= 0:
+        page_index = 1
+
+    return bvid, page_index
+
+
+def StringOrEmpty(value):
+    return str(value or "").strip()
+
+
+def safe_log_text(value):
+    text = StringOrEmpty(value)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+        return text
+    except Exception:
+        return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def fetch_bilibili_view_info(bvid, runtime_config):
+    if not bvid:
+        raise RuntimeError("Missing BVID.")
+
+    session = make_bilibili_session(runtime_config)
+    url = f"https://api.bilibili.com/x/web-interface/view?bvid={quote(str(bvid))}"
+    print(f"[bili] fetch view info: {bvid}")
+    payload = request_bilibili_json(session, url, timeout=20)
+    if payload.get("code") != 0:
+        raise RuntimeError(StringOrEmpty(payload.get("message")) or "Failed to fetch video info")
+
+    data = payload.get("data") or {}
+    pubdate = NumberOrZero(data.get("pubdate"))
+    upload_date = time.strftime("%Y-%m-%d", time.gmtime(pubdate)) if pubdate > 0 else ""
+    pages = data.get("pages") if isinstance(data.get("pages"), list) else []
+
+    return {
+        "aid": StringOrEmpty(data.get("aid")),
+        "bvid": StringOrEmpty(data.get("bvid")) or StringOrEmpty(bvid),
+        "title": StringOrEmpty(data.get("title")),
+        "author": StringOrEmpty(data.get("owner", {}).get("name")),
+        "description": StringOrEmpty(data.get("desc")),
+        "uploadDate": upload_date,
+        "defaultCid": StringOrEmpty(data.get("cid")),
+        "defaultDuration": NumberOrZero(data.get("duration")),
+        "pages": [
+            {
+                "cid": StringOrEmpty(item.get("cid")),
+                "page": NumberOrZero(item.get("page")),
+                "part": StringOrEmpty(item.get("part")),
+                "duration": NumberOrZero(item.get("duration")),
+            }
+            for item in pages
+        ],
+    }
+
+
+def format_bilibili_login_debug(login_status):
+    if not login_status:
+        return "unknown"
+    login_text = "true" if login_status.get("is_login") else "false"
+    uname = safe_log_text(login_status.get("uname"))
+    if uname:
+        return f"{login_text} uname={uname}"
+    return login_text
+
+
+def NumberOrZero(value):
+    try:
+        num = NumberOrZeroDecimal(value)
+        return num
+    except Exception:
+        return 0
+
+
+def NumberOrZeroDecimal(value):
+    num = float(value)
+    if not (num == num):
+        return 0
+    if num < 0:
+        return 0
+    return int(num)
+
+
+def resolve_cid_from_pages(view_info, page_index):
+    pages = view_info.get("pages") if isinstance(view_info, dict) else []
+    safe_page_index = NumberOrZero(page_index) or 1
+    if isinstance(pages, list) and pages:
+        page_by_index = pages[safe_page_index - 1] if safe_page_index - 1 < len(pages) else None
+        if page_by_index and page_by_index.get("cid"):
+            return page_by_index
+
+        for item in pages:
+            if NumberOrZero(item.get("page")) == safe_page_index and item.get("cid"):
+                return item
+
+        if pages[0].get("cid"):
+            return pages[0]
+
+    fallback_cid = StringOrEmpty(view_info.get("defaultCid") if isinstance(view_info, dict) else "")
+    if fallback_cid:
+        return {
+            "cid": fallback_cid,
+            "page": safe_page_index,
+            "part": "",
+            "duration": NumberOrZero(view_info.get("defaultDuration")) if isinstance(view_info, dict) else 0,
+        }
+
+    raise RuntimeError("Unable to resolve CID for the requested page.")
+
+
+def normalize_subtitle_url(url):
+    if not url:
+        return ""
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return f"https://{url.lstrip('/')}"
+
+
+def map_subtitle_tracks(subtitles, source="unknown"):
+    tracks = []
+    for item in subtitles or []:
+        subtitle_url = normalize_subtitle_url(item.get("subtitle_url") or "")
+        if not subtitle_url:
+            continue
+        lan = StringOrEmpty(item.get("lan"))
+        lan_doc = StringOrEmpty(item.get("lan_doc"))
+        is_ai = lan.lower().startswith("ai-") or "自动" in lan_doc or "ai" in lan_doc.lower()
+        tracks.append(
+            {
+                "id": StringOrEmpty(item.get("id")),
+                "lan": lan,
+                "lanDoc": lan_doc,
+                "subtitleUrl": subtitle_url,
+                "source": source,
+                "isAi": is_ai,
+            }
+        )
+    return tracks
+
+
+def subtitle_priority(item):
+    lan = StringOrEmpty(item.get("lan")).lower()
+    label = StringOrEmpty(item.get("lanDoc")).lower()
+    is_ai = bool(item.get("isAi")) or lan.startswith("ai-")
+    is_zh = (
+        lan in {"zh-cn", "zh-hans", "zh", "zh-sg", "zh-hk", "zh-tw"}
+        or "zh" in lan
+        or "中文" in label
+        or "简体" in label
+        or "繁体" in label
+        or "普通话" in label
+        or "国语" in label
+    )
+    is_en = lan in {"en", "en-us", "en-gb"} or "english" in label or "英文" in label
+
+    if is_zh and not is_ai:
+        return 0
+    if is_zh and is_ai:
+        return 1
+    if is_ai:
+        return 2
+    if is_zh:
+        return 3
+    if is_en:
+        return 10
+    return 50
+
+
+def normalize_subtitle_tracks(tracks):
+    unique = []
+    seen = set()
+    for item in sorted(tracks or [], key=lambda x: (subtitle_priority(x), StringOrEmpty(x.get("lanDoc")).lower(), StringOrEmpty(x.get("subtitleUrl")))):
+        key = (
+            StringOrEmpty(item.get("id")),
+            StringOrEmpty(item.get("lan")).lower(),
+            StringOrEmpty(item.get("subtitleUrl")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def pick_preferred_subtitle_track(tracks):
+    ordered = normalize_subtitle_tracks(tracks)
+    return ordered[0] if ordered else None
+
+
+def build_subtitle_requests(bvid, aid, cid):
+    safe_bvid = quote(StringOrEmpty(bvid))
+    safe_aid = quote(StringOrEmpty(aid))
+    safe_cid = quote(StringOrEmpty(cid))
+    requests_list = []
+    if aid:
+        requests_list.append(
+            (
+                "player-wbi-v2",
+                "https://api.bilibili.com/x/player/wbi/v2"
+                f"?aid={safe_aid}&cid={safe_cid}&bvid={safe_bvid}",
+            )
+        )
+    requests_list.append(
+        (
+            "player-v2",
+            "https://api.bilibili.com/x/player/v2"
+            f"?bvid={safe_bvid}&cid={safe_cid}&aid={safe_aid}",
+        )
+    )
+    return requests_list
+
+
+def fetch_bilibili_subtitle_tracks(bvid, aid, cid, runtime_config):
+    session = make_bilibili_session(runtime_config)
+    collected = []
+    for source, url in build_subtitle_requests(bvid, aid, cid):
+        try:
+            print(f"[bili] fetch subtitle tracks: {source}")
+            payload = request_bilibili_json(session, url, timeout=20)
+            if payload.get("code") != 0:
+                print(f"[warn] subtitle list failed from {source}: {payload.get('message') or payload.get('code')}")
+                continue
+            subtitle_data = payload.get("data") or {}
+            subtitles = subtitle_data.get("subtitle", {}).get("subtitles") or []
+            mapped = map_subtitle_tracks(subtitles, source)
+            print(f"[bili] subtitle tracks from {source}: {len(mapped)}")
+            if mapped:
+                for track in mapped:
+                    print(
+                        f"[bili] candidate: lan={track.get('lan') or ''} "
+                        f"lan_doc={safe_log_text(track.get('lanDoc'))} source={track.get('source') or source}"
+                    )
+                collected.extend(mapped)
+        except Exception as exc:
+            print(f"[warn] subtitle list request failed from {source}: {exc}")
+
+    return normalize_subtitle_tracks(collected)
+
+
+def download_bilibili_subtitle_json(track, runtime_config):
+    subtitle_url = normalize_subtitle_url(track.get("subtitleUrl"))
+    if not subtitle_url:
+        raise RuntimeError("Missing subtitle URL.")
+    session = make_bilibili_session(runtime_config)
+    print(f"[bili] fetch subtitle body: {subtitle_url}")
+    payload = request_bilibili_json(session, subtitle_url, timeout=30)
+    body = payload.get("body")
+    if not isinstance(body, list) or not body:
+        raise RuntimeError("Empty subtitle body.")
+    return payload
+
+
+def subtitle_body_to_txt(body):
+    lines = []
+    for item in body or []:
+        text = StringOrEmpty(item.get("content"))
+        if text:
+            lines.append(text)
+    return "\n".join(lines).strip()
+
+
+def format_subtitle_timestamp(seconds, for_srt=False):
+    safe = max(0, float(seconds or 0))
+    total_ms = int(safe * 1000)
+    hour = total_ms // 3600000
+    minute = (total_ms % 3600000) // 60000
+    second = (total_ms % 60000) // 1000
+    ms = total_ms % 1000
+    if for_srt:
+        return f"{hour:02d}:{minute:02d}:{second:02d},{ms:03d}"
+    return f"{hour:02d}:{minute:02d}:{second:02d}.{ms:03d}"
+
+
+def subtitle_body_to_srt(body):
+    chunks = []
+    for index, item in enumerate(body or [], start=1):
+        text = StringOrEmpty(item.get("content"))
+        if not text:
+            continue
+        chunks.append(
+            f"{index}\n{format_subtitle_timestamp(item.get('from'), True)} --> {format_subtitle_timestamp(item.get('to'), True)}\n{text}"
+        )
+    return "\n\n".join(chunks).strip()
+
+
+def validate_subtitle_body(body, video_duration=0):
+    if not isinstance(body, list) or not body:
+        return False, "empty"
+
+    max_to = 0.0
+    for item in body:
+        try:
+            to_value = float(item.get("to") or 0)
+            from_value = float(item.get("from") or 0)
+        except Exception:
+            continue
+        max_to = max(max_to, to_value, from_value)
+
+    duration = float(video_duration or 0)
+    if duration <= 0:
+        return True, "ok"
+
+    ratio = (max_to / duration) if duration > 0 else 0.0
+
+    upper_tolerance = max(12.0, duration * 0.15)
+    if max_to > duration + upper_tolerance:
+        return False, f"too-long max_to={max_to:.2f} duration={duration:.2f} ratio={ratio:.3f}"
+
+    if duration >= 600:
+        min_coverage = 0.18
+    elif duration >= 300:
+        min_coverage = 0.22
+    elif duration >= 180:
+        min_coverage = 0.25
+    else:
+        min_coverage = 0
+
+    if min_coverage > 0 and max_to < duration * min_coverage:
+        return False, f"too-short max_to={max_to:.2f} duration={duration:.2f} ratio={ratio:.3f}"
+
+    return True, "ok"
+
+
+def get_bilibili_title_from_view(url, runtime_config):
+    bvid, _ = extract_bvid_and_page(url)
+    if not bvid:
+        return ""
+    try:
+        info = fetch_bilibili_view_info(bvid, runtime_config)
+        return StringOrEmpty(info.get("title"))
+    except Exception:
+        return ""
+
+
+def download_preferred_subtitle(url, runtime_config, output_dir, use_pdf=False):
+    bvid, page_index = extract_bvid_and_page(url)
+    if not bvid:
+        raise RuntimeError("Unable to parse BVID from URL.")
+
+    view_info = fetch_bilibili_view_info(bvid, runtime_config)
+    page_info = resolve_cid_from_pages(view_info, page_index)
+    cid = StringOrEmpty(page_info.get("cid"))
+    if not cid:
+        raise RuntimeError("Unable to resolve CID for the requested page.")
+
+    print(
+        f"[bili] view: aid={view_info.get('aid') or ''} bvid={view_info.get('bvid') or bvid} "
+        f"page={page_index} cid={cid} duration={page_info.get('duration') or view_info.get('defaultDuration') or 0}"
+    )
+
+    try:
+        login_status = check_bilibili_login_status(runtime_config)
+        print(f"[bili] login: {format_bilibili_login_debug(login_status)}")
+        if not login_status["is_login"]:
+            print("[bili] cookies are not logged in; API/AI subtitles may be unavailable")
+    except Exception as exc:
+        print(f"[warn] unable to verify Bilibili login status: {exc}")
+
+    print(f"[step 1] checking Bilibili API subtitles (page={page_index}, cid={cid})")
+    tracks = fetch_bilibili_subtitle_tracks(bvid, view_info.get("aid"), cid, runtime_config)
+    if tracks:
+        preferred = pick_preferred_subtitle_track(tracks)
+        track_candidates = [preferred] + [item for item in tracks if item != preferred]
+        for track in track_candidates:
+            if not track:
+                continue
+            try:
+                subtitle_payload = download_bilibili_subtitle_json(track, runtime_config)
+                body = subtitle_payload.get("body") or []
+                ok, reason = validate_subtitle_body(body, page_info.get("duration") or view_info.get("defaultDuration"))
+                if not ok:
+                    print(f"[warn] subtitle body rejected from API: {reason}")
+                    continue
+
+                title = StringOrEmpty(view_info.get("title")) or load_cached_title(runtime_config, url)
+                save_current_title(title)
+                txt_text = subtitle_body_to_txt(body)
+                if not txt_text:
+                    continue
+                txt_path = convert_and_save(txt_text, title, output_dir)
+                srt_path = save_srt_file(title, subtitle_body_to_srt(body), output_dir)
+                pdf_path = maybe_generate_pdf(txt_path) if use_pdf else None
+                print(
+                    f"[subtitle] selected track lan={track.get('lan') or ''} "
+                    f"lang={safe_log_text(track.get('lanDoc'))} source={track.get('source') or 'api'}"
+                )
+                return {
+                    "kind": "subtitle",
+                    "title": title,
+                    "txt_path": txt_path,
+                    "srt_path": srt_path,
+                    "pdf_path": pdf_path,
+                    "track": track,
+                    "body": body,
+                }
+            except Exception as exc:
+                print(f"[warn] subtitle API track failed: {exc}")
+
+    print("[step 1] checking yt-dlp visible subtitles")
+    native_sub = download_native_sub(url, runtime_config)
+    if native_sub:
+        title = StringOrEmpty(view_info.get("title")) or get_video_title(url, runtime_config)
+        save_current_title(title)
+        raw_text = native_sub.read_text(encoding="utf-8")
+        subtitle_text = normalize_srt_text(raw_text)
+        generated_txt = convert_and_save(subtitle_text or raw_text, title, output_dir)
+        srt_path = save_srt_file(title, raw_text, output_dir)
+        pdf_path = maybe_generate_pdf(generated_txt) if use_pdf else None
+        return {
+            "kind": "subtitle",
+            "title": title,
+            "txt_path": generated_txt,
+            "srt_path": srt_path,
+            "pdf_path": pdf_path,
+            "track": None,
+            "body": [],
+        }
+
+    return None
+
+
 def download_native_sub(url, runtime_config):
-    print("[step 1] checking Bilibili native subtitles")
+    print("[step fallback] checking yt-dlp visible subtitles")
     for file_path in SCRIPT_DIR.glob(f"{TEMP_SUB_PREFIX}*.srt"):
         file_path.unlink()
 
@@ -448,6 +1033,11 @@ def download_audio(url, runtime_config):
     if TEMP_AUDIO.exists() and TEMP_AUDIO.stat().st_size > 1024:
         print("[cache] reusing downloaded audio")
         return TEMP_AUDIO, load_cached_title(runtime_config, url)
+
+    temp_audio_part = TEMP_AUDIO.with_suffix(TEMP_AUDIO.suffix + ".part")
+    if temp_audio_part.exists() and not TEMP_AUDIO.exists():
+        print("[cleanup] removing stale partial download before retry")
+        temp_audio_part.unlink()
 
     title = get_video_title(url, runtime_config)
     save_current_title(title)
@@ -594,7 +1184,9 @@ def simplify_text(text):
 
 
 def sanitize_title(title):
-    safe_title = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff _-]+", "", title).strip()
+    safe_title = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_.\-（）()【】\[\]]+", "_", title)
+    safe_title = re.sub(r"_+", "_", safe_title)
+    safe_title = safe_title.strip("._- ")
     return safe_title or "result_recovered"
 
 
@@ -621,6 +1213,15 @@ def convert_and_save(text, title, output_dir):
     final_text = simplify_text(text)
     output_path.write_text(final_text, encoding="utf-8")
     print(f"[save] txt written to {output_path}")
+    return output_path
+
+
+def save_srt_file(title, srt_text, output_dir):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_title = sanitize_title(title)
+    output_path = output_dir / f"{safe_title}.srt"
+    output_path.write_text(srt_text, encoding="utf-8")
+    print(f"[save] srt written to {output_path}")
     return output_path
 
 
@@ -823,11 +1424,13 @@ def validate_dependencies_for_mode(
         resolve_ffmpeg_command()
 
 
-def emit_artifacts(txt_path=None, pdf_path=None, summary_path=None, audio_path=None):
+def emit_artifacts(txt_path=None, pdf_path=None, summary_path=None, audio_path=None, srt_path=None):
     if audio_path:
         emit_result("AUDIO", audio_path)
     if txt_path:
         emit_result("TXT", txt_path)
+    if srt_path:
+        emit_result("SRT", srt_path)
     if pdf_path:
         emit_result("PDF", pdf_path)
     if summary_path:
@@ -840,6 +1443,21 @@ def main():
     output_dir = get_output_dir(args.output_dir, runtime_config["output_dir"])
     if args.proxy_url is not None:
         runtime_config["proxy_url"] = args.proxy_url
+
+    if args.check_bilibili_login:
+        try:
+            status = check_bilibili_login_status(runtime_config)
+            print(f"NAV_CODE={status['nav_code']}")
+            print(f"IS_LOGIN={status['is_login']}")
+            print(f"MESSAGE={status['message']}")
+            if status["is_login"] and status["uname"]:
+                print(f"UNAME={status['uname']}")
+            if args.require_login and not status["is_login"]:
+                return 2
+            return 0
+        except Exception as exc:
+            print(f"[error] {exc}")
+            return 1
 
     if args.summarize_file:
         try:
@@ -893,24 +1511,31 @@ def main():
         )
 
         if url and not args.skip_native_sub:
-            native_sub = download_native_sub(url, runtime_config)
-            if native_sub:
-                title = get_video_title(url, runtime_config)
-                save_current_title(title)
-                raw_text = native_sub.read_text(encoding="utf-8")
-                subtitle_text = normalize_srt_text(raw_text)
-                generated_txt = convert_and_save(subtitle_text or raw_text, title, output_dir)
-                pdf_path = maybe_generate_pdf(generated_txt) if args.pdf else None
+            try:
+                subtitle_result = download_preferred_subtitle(
+                    url,
+                    runtime_config,
+                    output_dir,
+                    use_pdf=args.pdf,
+                )
+            except Exception as exc:
+                print(f"[warn] Bilibili API subtitle path failed, fallback to audio: {exc}")
+                subtitle_result = None
+            if subtitle_result:
+                generated_txt = subtitle_result["txt_path"]
+                srt_path = subtitle_result.get("srt_path")
+                pdf_path = subtitle_result["pdf_path"]
                 summary_path = None
                 if args.summarize and not args.download_only:
                     summary_path = summarize_txt_file(generated_txt, runtime_config)
                 emit_artifacts(
                     txt_path=generated_txt,
+                    srt_path=srt_path,
                     pdf_path=pdf_path,
                     summary_path=summary_path,
                 )
                 if not args.keep_temp:
-                    wipe_cache("native subtitle path finished")
+                    wipe_cache("subtitle path finished")
                 return 0
 
         if args.download_only:

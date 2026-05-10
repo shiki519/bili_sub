@@ -26,6 +26,10 @@ DEEPSEEK_TIMEOUT=300
 # Optional Bilibili cookies file
 BILIBILI_COOKIES="./bilibili.txt"
 
+# Optional: load Bilibili cookies from a local browser profile for API subtitles.
+# Examples: chrome, edge, firefox, chrome:Default
+BILIBILI_COOKIES_FROM_BROWSER=""
+
 # Prefer lower bitrate audio first to reduce download size and CDN interruption risk.
 YTDLP_AUDIO_FORMAT="30216/30232/30280/ba[ext=m4a]/ba/bestaudio"
 

@@ -9,7 +9,7 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-URL="$1"
+URL="$(printf '%s' "$1" | tr -d '\r\n' | xargs)"
 shift
 EXTRA_ARGS=("$@")
 
@@ -186,6 +186,7 @@ fi
 
 TXT_PATH="$(extract_result "RESULT_TXT")"
 PDF_PATH="$(extract_result "RESULT_PDF")"
+SRT_PATH="$(extract_result "RESULT_SRT")"
 AUDIO_PATH="$(extract_result "RESULT_AUDIO")"
 TITLE="$(extract_result "RESULT_TITLE")"
 
@@ -232,6 +233,9 @@ if [[ -z "$SUMMARY_PATH" ]]; then
 fi
 
 echo "RESULT_TXT=${TXT_PATH}"
+if [[ -n "$SRT_PATH" ]]; then
+  echo "RESULT_SRT=${SRT_PATH}"
+fi
 if [[ -n "$PDF_PATH" ]]; then
   echo "RESULT_PDF=${PDF_PATH}"
 fi

@@ -43,6 +43,37 @@ Tencent Cloud Hong Kong servers may hit Bilibili `412` checks or mid-download in
 BILIBILI_COOKIES="./bilibili.txt"
 ```
 
+When testing on a local desktop where the browser is already logged in, you can let the script reuse that browser session:
+
+```ini
+BILIBILI_COOKIES_FROM_BROWSER="chrome"
+```
+
+Supported values follow `yt-dlp` browser names, such as `chrome`, `edge`, `firefox`, or `chrome:Default`. If this is set, Bilibili API subtitle requests and `yt-dlp` calls use the browser cookies first.
+
+You can verify whether the configured cookies are really logged in before testing subtitle APIs:
+
+```powershell
+python .\bili_groq.py --check-bilibili-login
+```
+
+For automation, require a valid logged-in cookie jar and return non-zero otherwise:
+
+```powershell
+python .\bili_groq.py --check-bilibili-login --require-login
+```
+
+Expected machine-readable output:
+
+```text
+NAV_CODE=0
+IS_LOGIN=True
+MESSAGE=0
+UNAME=your_bilibili_name
+```
+
+If `IS_LOGIN=False`, the script can still fall back to `yt-dlp` subtitles or audio download, but Bilibili API or AI subtitles may be unavailable.
+
 The script passes explicit Bilibili headers and these `yt-dlp` stability options:
 
 ```bash
@@ -135,16 +166,23 @@ python bili_groq.py "https://www.bilibili.com/video/BVxxxx/" --download-only
 
 Behavior:
 
-1. Checks Bilibili native subtitles first.
-2. If native subtitles exist, writes `output/<title>.txt`.
-3. Otherwise downloads audio to `temp_download.m4a`.
+1. Checks Bilibili API / AI subtitles first.
+2. Falls back to `yt-dlp` visible `.srt` subtitles.
+3. Only if both subtitle paths fail, downloads audio to `temp_download.m4a`.
 4. Does not call Groq.
 5. Does not call DeepSeek.
 
-Current limitation:
+Subtitle priority:
 
-- The native subtitle path currently only supports `yt-dlp` visible `.srt` subtitles.
-- Bilibili webpage AI subtitles and API subtitles need a separate extractor in a later update.
+- Bilibili API / AI subtitles
+- `yt-dlp` visible `.srt` subtitles
+- Audio download + Groq
+
+Notes:
+
+- `danmaku.xml` is bullet chat, not spoken subtitle text, so it is not used as the default transcript source.
+- When subtitle paths succeed, the script writes both `output/<title>.txt` and `output/<title>.srt` for debugging.
+- When Bilibili API subtitles are available, `--download-only` returns `RESULT_TXT`, `RESULT_SRT`, and optional `RESULT_PDF` directly without downloading audio.
 
 Machine-readable output:
 
@@ -157,6 +195,7 @@ or:
 
 ```text
 RESULT_TXT=/abs/path/to/output/xxx.txt
+RESULT_SRT=/abs/path/to/output/xxx.srt
 RESULT_PDF=/abs/path/to/output/xxx.pdf
 ```
 
