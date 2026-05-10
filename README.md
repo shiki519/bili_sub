@@ -13,10 +13,11 @@ Cross-platform Bilibili subtitle/transcript helper for Windows and Linux/cloud h
 
 - `auto_sub.ps1`: Windows PowerShell launcher.
 - `auto_sub.sh`: Linux/cloud launcher.
+- `scripts/run_bili_sub.sh`: staged Linux/cloud wrapper for more stable retries and recovery.
 
 ## keys.config format
 
-You can start from `keys.config.example` and fill in your own values locally.
+Start from `keys.config.example` and fill in your own local values.
 
 Basic example:
 
@@ -28,13 +29,13 @@ PROXY_URL=""
 BILIBILI_COOKIES="./bilibili.txt"
 ```
 
-`PROXY_URL` is only a generic fallback. In more complex server environments, prefer per-service proxy settings.
+`PROXY_URL` is only a generic fallback. On servers, prefer the split proxy settings below.
 
 ## Bilibili Stability
 
 Tencent Cloud Hong Kong servers may hit Bilibili `412` checks or mid-download interruptions while fetching audio.
 
-- `412` usually means you need valid Bilibili cookies.
+- `412` usually means valid Bilibili cookies are required.
 - Export cookies in Netscape format and save them as `bilibili.txt`.
 - Then set this in `keys.config`:
 
@@ -42,20 +43,27 @@ Tencent Cloud Hong Kong servers may hit Bilibili `412` checks or mid-download in
 BILIBILI_COOKIES="./bilibili.txt"
 ```
 
-For Bilibili requests, the script passes explicit request headers and these `yt-dlp` stability options:
+The script passes explicit Bilibili headers and these `yt-dlp` stability options:
 
 ```bash
 --continue
---retries 10
---fragment-retries 10
---file-access-retries 10
---retry-sleep 2
+--retries 30
+--fragment-retries 30
+--file-access-retries 30
+--retry-sleep 5
 --http-chunk-size 512K
 ```
 
-You can override those defaults in `keys.config`:
+It also prefers lower bitrate audio first to reduce download size and CDN interruption risk:
 
 ```ini
+YTDLP_AUDIO_FORMAT="30216/30232/30280/ba[ext=m4a]/ba/bestaudio"
+```
+
+You can override the defaults in `keys.config`:
+
+```ini
+YTDLP_AUDIO_FORMAT="30216/30232/30280/ba[ext=m4a]/ba/bestaudio"
 YTDLP_RETRIES=30
 YTDLP_FRAGMENT_RETRIES=30
 YTDLP_FILE_ACCESS_RETRIES=30
@@ -92,7 +100,7 @@ python -m pip install -r requirements.txt
 - `yt-dlp` if you do not install it from `requirements.txt`
 - `ffmpeg` is optional if you install `imageio-ffmpeg` from `requirements.txt`
 
-## Usage
+## Standard usage
 
 Windows:
 
@@ -117,6 +125,102 @@ python .\bili_groq.py "https://www.bilibili.com/video/BV..." --pdf --summarize
 python .\bili_groq.py --summarize-file "output\英国衰弱的不像话了.txt"
 ```
 
+## Staged commands
+
+Download only:
+
+```bash
+python bili_groq.py "https://www.bilibili.com/video/BVxxxx/" --download-only
+```
+
+Behavior:
+
+1. Checks Bilibili native subtitles first.
+2. If native subtitles exist, writes `output/<title>.txt`.
+3. Otherwise downloads audio to `temp_download.m4a`.
+4. Does not call Groq.
+5. Does not call DeepSeek.
+
+Machine-readable output:
+
+```text
+RESULT_AUDIO=/abs/path/to/temp_download.m4a
+```
+
+or:
+
+```text
+RESULT_TXT=/abs/path/to/output/xxx.txt
+RESULT_PDF=/abs/path/to/output/xxx.pdf
+```
+
+Transcribe an existing audio file:
+
+```bash
+python bili_groq.py --transcribe-file temp_download.m4a --title "视频标题" --pdf
+```
+
+Behavior:
+
+1. Splits the existing audio into chunks.
+2. Calls Groq Whisper.
+3. Writes `output/<title>.txt`.
+4. Does not redownload the video.
+5. Does not call DeepSeek.
+
+Machine-readable output:
+
+```text
+RESULT_TXT=/abs/path/to/output/xxx.txt
+RESULT_PDF=/abs/path/to/output/xxx.pdf
+```
+
+Summarize an existing transcript:
+
+```bash
+python bili_groq.py --summarize-file "output/英国衰弱的不像话了.txt"
+```
+
+Machine-readable output:
+
+```text
+RESULT_SUMMARY=/abs/path/to/output/xxx.summary.md
+```
+
+## Wrapper flow
+
+For server or OpenClaw usage, prefer the staged wrapper:
+
+```bash
+chmod +x scripts/run_bili_sub.sh
+./scripts/run_bili_sub.sh "https://www.bilibili.com/video/BVxxxx/"
+```
+
+What it does:
+
+1. Changes to the project root.
+2. Optionally runs `git pull --ff-only` when `BILI_SUB_GIT_PULL=1`.
+3. Activates `.venv` when present.
+4. Checks `mihomo.service` and port `127.0.0.1:7890`.
+5. Runs `download-only`, `transcribe-file`, and `summarize-file` as separate stages.
+6. Retries each stage independently.
+7. Keeps successful earlier-stage artifacts so later retries do not restart the whole pipeline.
+
+Successful wrapper output:
+
+```text
+RESULT_TXT=/home/ubuntu/projects/bili_sub/output/xxx.txt
+RESULT_PDF=/home/ubuntu/projects/bili_sub/output/xxx.pdf
+RESULT_SUMMARY=/home/ubuntu/projects/bili_sub/output/xxx.summary.md
+```
+
+Failure output:
+
+```text
+[wrapper] failed at stage: download/transcribe/summary
+[wrapper] log: logs/run_xxx.log
+```
+
 ## Verification
 
 DeepSeek summary only:
@@ -132,11 +236,11 @@ Expected log:
 [summary] sending transcript to DeepSeek model=deepseek-chat proxy=direct
 ```
 
-Full flow:
+Full staged flow:
 
 ```bash
 source .venv/bin/activate
-./auto_sub.sh "https://www.bilibili.com/video/BV1jB9XB1EeZ/" --summarize
+./scripts/run_bili_sub.sh "https://www.bilibili.com/video/BV1jB9XB1EeZ/"
 ```
 
 Expected behavior:

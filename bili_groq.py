@@ -32,6 +32,14 @@ TASK_FILE = SCRIPT_DIR / ".current_task_url"
 TITLE_FILE = SCRIPT_DIR / ".current_task_title"
 TEMP_SUB_PREFIX = "temp_sub"
 current_key_index = 0
+ASR_PROMPT_LINES = (
+    "请将这段中文视频音频转写为简体中文，尽量补齐标点。",
+    "保留人名、地名、机构名、日期和数字。",
+    "不要加入解释、总结或额外指令。",
+    "如果音频中出现广告、口播、玩笑或重复句，也按原文转写。",
+)
+ASR_PROMPT = "".join(ASR_PROMPT_LINES)
+SUMMARY_USER_PREFIX = "以下是视频转写文本，请按照要求分析：\n\n"
 
 
 def parse_args():
@@ -52,7 +60,7 @@ def parse_args():
     parser.add_argument(
         "--proxy-url",
         default=None,
-        help="HTTP/HTTPS proxy URL for Groq API requests",
+        help="Generic fallback HTTP/HTTPS proxy URL for supported requests",
     )
     parser.add_argument(
         "--pdf",
@@ -78,6 +86,21 @@ def parse_args():
         "--summarize-file",
         default=None,
         help="Summarize an existing TXT file with DeepSeek without downloading/transcribing",
+    )
+    parser.add_argument(
+        "--download-only",
+        action="store_true",
+        help="Only download audio or use native subtitles, without Groq or DeepSeek",
+    )
+    parser.add_argument(
+        "--transcribe-file",
+        default=None,
+        help="Transcribe an existing local audio file without downloading it again",
+    )
+    parser.add_argument(
+        "--title",
+        default=None,
+        help="Title to use with --transcribe-file",
     )
     return parser.parse_args()
 
@@ -110,10 +133,11 @@ def load_runtime_config(config_path):
         "deepseek_retries": "3",
         "deepseek_timeout": "300",
         "bilibili_cookies": "",
-        "ytdlp_retries": "10",
-        "ytdlp_fragment_retries": "10",
-        "ytdlp_file_access_retries": "10",
-        "ytdlp_retry_sleep": "2",
+        "ytdlp_audio_format": "30216/30232/30280/ba[ext=m4a]/ba/bestaudio",
+        "ytdlp_retries": "30",
+        "ytdlp_fragment_retries": "30",
+        "ytdlp_file_access_retries": "30",
+        "ytdlp_retry_sleep": "5",
         "ytdlp_http_chunk_size": "512K",
     }
 
@@ -161,6 +185,8 @@ def load_runtime_config(config_path):
                 config["deepseek_timeout"] = value
             elif key_name == "BILIBILI_COOKIES":
                 config["bilibili_cookies"] = value
+            elif key_name == "YTDLP_AUDIO_FORMAT" and value:
+                config["ytdlp_audio_format"] = value
             elif key_name == "YTDLP_RETRIES" and value:
                 config["ytdlp_retries"] = value
             elif key_name == "YTDLP_FRAGMENT_RETRIES" and value:
@@ -174,7 +200,9 @@ def load_runtime_config(config_path):
 
     env_overrides = {
         "BILI_SUB_PROXY_URL": "proxy_url",
+        "PROXY_URL": "proxy_url",
         "BILI_SUB_OUTPUT_DIR": "output_dir",
+        "OUTPUT_DIR": "output_dir",
         "YTDLP_PROXY_URL": "ytdlp_proxy_url",
         "GROQ_PROXY_URL": "groq_proxy_url",
         "DEEPSEEK_PROXY_URL": "deepseek_proxy_url",
@@ -185,6 +213,7 @@ def load_runtime_config(config_path):
         "DEEPSEEK_RETRIES": "deepseek_retries",
         "DEEPSEEK_TIMEOUT": "deepseek_timeout",
         "BILIBILI_COOKIES": "bilibili_cookies",
+        "YTDLP_AUDIO_FORMAT": "ytdlp_audio_format",
         "YTDLP_RETRIES": "ytdlp_retries",
         "YTDLP_FRAGMENT_RETRIES": "ytdlp_fragment_retries",
         "YTDLP_FILE_ACCESS_RETRIES": "ytdlp_file_access_retries",
@@ -366,6 +395,13 @@ def save_current_title(title):
         TITLE_FILE.write_text(title, encoding="utf-8")
 
 
+def load_saved_title():
+    if not TITLE_FILE.exists():
+        return ""
+    title = TITLE_FILE.read_text(encoding="utf-8").strip()
+    return title
+
+
 def load_cached_title(runtime_config, url=""):
     if url:
         try:
@@ -375,10 +411,9 @@ def load_cached_title(runtime_config, url=""):
         except Exception:
             pass
 
-    if TITLE_FILE.exists():
-        title = TITLE_FILE.read_text(encoding="utf-8").strip()
-        if title:
-            return title
+    saved_title = load_saved_title()
+    if saved_title:
+        return saved_title
 
     return "Cached_Video"
 
@@ -417,11 +452,12 @@ def download_audio(url, runtime_config):
     title = get_video_title(url, runtime_config)
     save_current_title(title)
     print(f"[video] title: {title}")
+    print(f"[ytdlp] audio format: {runtime_config['ytdlp_audio_format']}")
 
     cmd = build_ytdlp_command(runtime_config, needs_cookies=True) + [
         "-x",
         "-f",
-        "ba[ext=m4a]/ba/bestaudio",
+        runtime_config["ytdlp_audio_format"],
         "--audio-format",
         "m4a",
         "-o",
@@ -497,13 +533,7 @@ def call_groq_api(filepath, chunk_index, total_chunks, api_keys, runtime_config)
                     "file": (filepath.name, audio_file),
                     "model": (None, "whisper-large-v3-turbo"),
                     "language": (None, "zh"),
-                    "prompt": (
-                        None,
-                        "请将这段中文视频音频转写为简体中文，尽量补齐标点。"
-                        "保留人名、地名、机构名、日期和数字。"
-                        "不要加入解释、总结或额外指令。"
-                        "如果音频中出现广告、口播、玩笑或重复句，也按原文转写。",
-                    ),
+                    "prompt": (None, ASR_PROMPT),
                     "response_format": (None, "text"),
                 }
                 print(f"[api] uploading chunk {chunk_index}/{total_chunks}")
@@ -568,6 +598,17 @@ def sanitize_title(title):
     return safe_title or "result_recovered"
 
 
+def resolve_local_path(path_value):
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = SCRIPT_DIR / path
+    return path.resolve()
+
+
+def emit_result(name, path_value):
+    print(f"RESULT_{name}={Path(path_value).resolve()}")
+
+
 def convert_and_save(text, title, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_title = sanitize_title(title)
@@ -588,6 +629,31 @@ def maybe_generate_pdf(txt_path):
     return convert_txt_to_pdf(str(txt_path))
 
 
+def transcribe_audio_file(audio_path, title, runtime_config, output_dir):
+    audio_file = resolve_local_path(audio_path)
+    if not audio_file.exists():
+        raise RuntimeError(f"Audio file not found: {audio_file}")
+
+    print(f"[step 3] using audio file: {audio_file}")
+    chunks = compress_and_split(audio_file)
+    if not chunks:
+        raise RuntimeError("No audio chunks were generated.")
+
+    print(f"[step 4] transcribing {len(chunks)} chunk(s)")
+    final_parts = []
+    for index, chunk in enumerate(chunks, start=1):
+        part_text = call_groq_api(
+            chunk,
+            index,
+            len(chunks),
+            runtime_config["api_keys"],
+            runtime_config,
+        )
+        final_parts.append(part_text)
+
+    return convert_and_save("\n".join(final_parts), title, output_dir)
+
+
 def load_prompt_file(prompt_path):
     prompt_file = Path(prompt_path).expanduser()
     if not prompt_file.is_absolute():
@@ -605,12 +671,8 @@ def load_prompt_file(prompt_path):
 
 def preclean_transcript(text):
     cleaned = text.replace("\ufeff", "").replace("\x00", "")
-    prompt_residue = {
-        "请将这段中文视频音频转写为简体中文，尽量补齐标点。",
-        "保留人名、地名、机构名、日期和数字。",
-        "不要加入解释、总结或额外指令。",
-        "如果音频中出现广告、口播、玩笑或重复句，也按原文转写。",
-    }
+    prompt_residue = set(ASR_PROMPT_LINES)
+    prompt_residue.add(ASR_PROMPT)
 
     kept_lines = []
     for raw_line in cleaned.splitlines():
@@ -648,7 +710,7 @@ def call_deepseek_summary(transcript_text, prompt_text, runtime_config):
             },
             {
                 "role": "user",
-                "content": "以下是视频转写文本，请按照要求分析：\n\n" + transcript_text,
+                "content": SUMMARY_USER_PREFIX + transcript_text,
             },
         ],
         "temperature": 0.2,
@@ -741,6 +803,28 @@ def validate_dependencies(will_use_native_sub, will_transcribe):
         resolve_ffmpeg_command()
 
 
+def validate_dependencies_for_mode(
+    will_use_native_sub=False,
+    will_download_audio=False,
+    will_transcribe=False,
+):
+    if will_use_native_sub or will_download_audio or will_transcribe:
+        resolve_ytdlp_command()
+    if will_transcribe:
+        resolve_ffmpeg_command()
+
+
+def emit_artifacts(txt_path=None, pdf_path=None, summary_path=None, audio_path=None):
+    if audio_path:
+        emit_result("AUDIO", audio_path)
+    if txt_path:
+        emit_result("TXT", txt_path)
+    if pdf_path:
+        emit_result("PDF", pdf_path)
+    if summary_path:
+        emit_result("SUMMARY", summary_path)
+
+
 def main():
     args = parse_args()
     runtime_config = load_runtime_config(args.keys_file)
@@ -750,14 +834,38 @@ def main():
 
     if args.summarize_file:
         try:
-            summarize_txt_file(args.summarize_file, runtime_config)
+            summary_path = summarize_txt_file(args.summarize_file, runtime_config)
+            emit_artifacts(summary_path=summary_path)
+            return 0
+        except Exception as exc:
+            print(f"[error] {exc}")
+            return 1
+
+    if args.transcribe_file:
+        try:
+            validate_dependencies_for_mode(will_transcribe=True)
+            title = args.title or load_saved_title() or Path(args.transcribe_file).stem
+            generated_txt = transcribe_audio_file(
+                args.transcribe_file,
+                title,
+                runtime_config,
+                output_dir,
+            )
+            pdf_path = maybe_generate_pdf(generated_txt) if args.pdf else None
+            emit_artifacts(txt_path=generated_txt, pdf_path=pdf_path)
+            if args.summarize:
+                print("[info] --summarize is ignored with --transcribe-file. Run --summarize-file separately.")
             return 0
         except Exception as exc:
             print(f"[error] {exc}")
             return 1
 
     if not args.url and not TEMP_AUDIO.exists():
-        print("Usage: python bili_groq.py <URL> [--pdf]")
+        print(
+            "Usage: python bili_groq.py <URL> [--pdf] [--summarize] "
+            "| --transcribe-file <audio_path> [--title <title>] "
+            "| --summarize-file <txt_path>"
+        )
         return 1
 
     url = args.url or ""
@@ -768,9 +876,10 @@ def main():
         check_task_consistency(url)
 
     try:
-        validate_dependencies(
+        validate_dependencies_for_mode(
             will_use_native_sub=bool(url and not args.skip_native_sub),
-            will_transcribe=bool(url or TEMP_AUDIO.exists()),
+            will_download_audio=bool(url),
+            will_transcribe=bool(not args.download_only and (url or TEMP_AUDIO.exists())),
         )
 
         if url and not args.skip_native_sub:
@@ -781,42 +890,43 @@ def main():
                 raw_text = native_sub.read_text(encoding="utf-8")
                 subtitle_text = normalize_srt_text(raw_text)
                 generated_txt = convert_and_save(subtitle_text or raw_text, title, output_dir)
-                if args.pdf:
-                    maybe_generate_pdf(generated_txt)
-                if args.summarize:
-                    summarize_txt_file(generated_txt, runtime_config)
+                pdf_path = maybe_generate_pdf(generated_txt) if args.pdf else None
+                summary_path = None
+                if args.summarize and not args.download_only:
+                    summary_path = summarize_txt_file(generated_txt, runtime_config)
+                emit_artifacts(
+                    txt_path=generated_txt,
+                    pdf_path=pdf_path,
+                    summary_path=summary_path,
+                )
                 if not args.keep_temp:
                     wipe_cache("native subtitle path finished")
                 return 0
+
+        if args.download_only:
+            if not url:
+                raise RuntimeError("--download-only requires a Bilibili URL.")
+            audio_path, title = download_audio(url, runtime_config)
+            print(f"[download-only] audio ready for title: {title}")
+            emit_artifacts(audio_path=audio_path)
+            return 0
 
         if url:
             _, title = download_audio(url, runtime_config)
         elif TEMP_AUDIO.exists():
             print("[step 2] using existing cached audio")
+            title = load_saved_title() or load_cached_title(runtime_config)
         else:
             raise RuntimeError("No URL provided and no cached audio found.")
 
-        chunks = compress_and_split(TEMP_AUDIO)
-        if not chunks:
-            raise RuntimeError("No audio chunks were generated.")
-
-        print(f"[step 4] transcribing {len(chunks)} chunk(s)")
-        final_parts = []
-        for index, chunk in enumerate(chunks, start=1):
-            part_text = call_groq_api(
-                chunk,
-                index,
-                len(chunks),
-                runtime_config["api_keys"],
-                runtime_config,
-            )
-            final_parts.append(part_text)
-
-        generated_txt = convert_and_save("\n".join(final_parts), title, output_dir)
-        if args.pdf:
-            maybe_generate_pdf(generated_txt)
-        if args.summarize:
-            summarize_txt_file(generated_txt, runtime_config)
+        generated_txt = transcribe_audio_file(TEMP_AUDIO, title, runtime_config, output_dir)
+        pdf_path = maybe_generate_pdf(generated_txt) if args.pdf else None
+        summary_path = summarize_txt_file(generated_txt, runtime_config) if args.summarize else None
+        emit_artifacts(
+            txt_path=generated_txt,
+            pdf_path=pdf_path,
+            summary_path=summary_path,
+        )
 
         if not args.keep_temp:
             wipe_cache("task finished")

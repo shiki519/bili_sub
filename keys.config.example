@@ -26,6 +26,9 @@ DEEPSEEK_TIMEOUT=300
 # Optional Bilibili cookies file
 BILIBILI_COOKIES="./bilibili.txt"
 
+# Prefer lower bitrate audio first to reduce download size and CDN interruption risk.
+YTDLP_AUDIO_FORMAT="30216/30232/30280/ba[ext=m4a]/ba/bestaudio"
+
 # yt-dlp retry/download stability options
 YTDLP_RETRIES=30
 YTDLP_FRAGMENT_RETRIES=30

@@ -5,6 +5,7 @@ __pycache__/
 .current_task_title
 
 output/
+logs/
 temp_chunks/
 temp_sub*.srt
 temp_download.m4a
