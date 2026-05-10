@@ -609,6 +609,11 @@ def emit_result(name, path_value):
     print(f"RESULT_{name}={Path(path_value).resolve()}")
 
 
+def emit_text_result(name, text_value):
+    normalized = str(text_value).replace("\r", " ").replace("\n", " ").strip()
+    print(f"RESULT_{name}={normalized}")
+
+
 def convert_and_save(text, title, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_title = sanitize_title(title)
@@ -629,10 +634,14 @@ def maybe_generate_pdf(txt_path):
     return convert_txt_to_pdf(str(txt_path))
 
 
-def transcribe_audio_file(audio_path, title, runtime_config, output_dir):
+def transcribe_audio_file(audio_path, title, runtime_config, output_dir, clear_chunk_cache=False):
     audio_file = resolve_local_path(audio_path)
     if not audio_file.exists():
         raise RuntimeError(f"Audio file not found: {audio_file}")
+
+    if clear_chunk_cache and WORK_DIR.exists():
+        print("[cleanup] clearing stale chunk cache before transcription")
+        shutil.rmtree(WORK_DIR)
 
     print(f"[step 3] using audio file: {audio_file}")
     chunks = compress_and_split(audio_file)
@@ -850,6 +859,7 @@ def main():
                 title,
                 runtime_config,
                 output_dir,
+                clear_chunk_cache=True,
             )
             pdf_path = maybe_generate_pdf(generated_txt) if args.pdf else None
             emit_artifacts(txt_path=generated_txt, pdf_path=pdf_path)
@@ -908,6 +918,7 @@ def main():
                 raise RuntimeError("--download-only requires a Bilibili URL.")
             audio_path, title = download_audio(url, runtime_config)
             print(f"[download-only] audio ready for title: {title}")
+            emit_text_result("TITLE", title)
             emit_artifacts(audio_path=audio_path)
             return 0
 

@@ -13,7 +13,7 @@ Cross-platform Bilibili subtitle/transcript helper for Windows and Linux/cloud h
 
 - `auto_sub.ps1`: Windows PowerShell launcher.
 - `auto_sub.sh`: Linux/cloud launcher.
-- `scripts/run_bili_sub.sh`: staged Linux/cloud wrapper for more stable retries and recovery.
+- `run_bili_sub.sh`: staged Linux/cloud wrapper for more stable retries and recovery.
 
 ## keys.config format
 
@@ -141,9 +141,15 @@ Behavior:
 4. Does not call Groq.
 5. Does not call DeepSeek.
 
+Current limitation:
+
+- The native subtitle path currently only supports `yt-dlp` visible `.srt` subtitles.
+- Bilibili webpage AI subtitles and API subtitles need a separate extractor in a later update.
+
 Machine-readable output:
 
 ```text
+RESULT_TITLE=视频真实标题
 RESULT_AUDIO=/abs/path/to/temp_download.m4a
 ```
 
@@ -192,8 +198,8 @@ RESULT_SUMMARY=/abs/path/to/output/xxx.summary.md
 For server or OpenClaw usage, prefer the staged wrapper:
 
 ```bash
-chmod +x scripts/run_bili_sub.sh
-./scripts/run_bili_sub.sh "https://www.bilibili.com/video/BVxxxx/"
+chmod +x run_bili_sub.sh
+./run_bili_sub.sh "https://www.bilibili.com/video/BVxxxx/"
 ```
 
 What it does:
@@ -201,7 +207,7 @@ What it does:
 1. Changes to the project root.
 2. Optionally runs `git pull --ff-only` when `BILI_SUB_GIT_PULL=1`.
 3. Activates `.venv` when present.
-4. Checks `mihomo.service` and port `127.0.0.1:7890`.
+4. Checks `mihomo.service` with `systemctl --user` and probes port `127.0.0.1:7890`.
 5. Runs `download-only`, `transcribe-file`, and `summarize-file` as separate stages.
 6. Retries each stage independently.
 7. Keeps successful earlier-stage artifacts so later retries do not restart the whole pipeline.
@@ -240,7 +246,7 @@ Full staged flow:
 
 ```bash
 source .venv/bin/activate
-./scripts/run_bili_sub.sh "https://www.bilibili.com/video/BV1jB9XB1EeZ/"
+./run_bili_sub.sh "https://www.bilibili.com/video/BV1jB9XB1EeZ/"
 ```
 
 Expected behavior:

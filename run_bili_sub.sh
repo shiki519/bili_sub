@@ -2,11 +2,11 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: ./scripts/run_bili_sub.sh <Bilibili_URL> [extra args]"
+  echo "Usage: ./run_bili_sub.sh <Bilibili_URL> [extra args]"
   exit 1
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 URL="$1"
@@ -56,10 +56,22 @@ fi
 
 check_proxy_health() {
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-active --quiet mihomo.service; then
+    if systemctl --user is-active --quiet mihomo.service; then
       log "[wrapper] mihomo.service: active"
     else
       log "[wrapper] mihomo.service: inactive"
+      if [[ "${BILI_SUB_RESTART_MIHOMO:-0}" == "1" ]]; then
+        log "[wrapper] restarting mihomo.service via systemctl --user"
+        if systemctl --user restart mihomo.service >>"$LOG_FILE" 2>&1; then
+          if systemctl --user is-active --quiet mihomo.service; then
+            log "[wrapper] mihomo.service: active after restart"
+          else
+            log "[wrapper] mihomo.service: still inactive after restart"
+          fi
+        else
+          log "[wrapper] mihomo.service restart failed"
+        fi
+      fi
     fi
   else
     log "[wrapper] systemctl not found, skip mihomo.service check"
@@ -112,16 +124,17 @@ cleanup_retry_state() {
 STAGE_OUTPUT=""
 
 run_and_capture() {
-  local output=""
+  local stage_file=""
   local status=0
+  stage_file="$(mktemp "${TMPDIR:-/tmp}/bili_sub_stage.XXXXXX")"
 
   set +e
-  output="$("$@" 2>&1)"
-  status=$?
+  "$@" 2>&1 | tee -a "$LOG_FILE" | tee "$stage_file"
+  status=${PIPESTATUS[0]}
   set -e
 
-  STAGE_OUTPUT="$output"
-  printf '%s\n' "$output" | tee -a "$LOG_FILE"
+  STAGE_OUTPUT="$(cat "$stage_file")"
+  rm -f "$stage_file"
   return "$status"
 }
 
@@ -174,6 +187,7 @@ fi
 TXT_PATH="$(extract_result "RESULT_TXT")"
 PDF_PATH="$(extract_result "RESULT_PDF")"
 AUDIO_PATH="$(extract_result "RESULT_AUDIO")"
+TITLE="$(extract_result "RESULT_TITLE")"
 
 if [[ -z "$TXT_PATH" ]]; then
   if [[ -z "$AUDIO_PATH" ]]; then
@@ -182,6 +196,9 @@ if [[ -z "$TXT_PATH" ]]; then
   fi
 
   TRANSCRIBE_CMD=("$PYTHON_BIN" "$ROOT_DIR/bili_groq.py" "--transcribe-file" "$AUDIO_PATH" "--pdf")
+  if [[ -n "$TITLE" ]]; then
+    TRANSCRIBE_CMD+=("--title" "$TITLE")
+  fi
   if (( ${#EXTRA_ARGS[@]} > 0 )); then
     TRANSCRIBE_CMD+=("${EXTRA_ARGS[@]}")
   fi
