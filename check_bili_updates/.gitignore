@@ -1,3 +1,5 @@
 __pycache__/
 bilibili.txt
 updates.md
+seen_videos.json
+*.log

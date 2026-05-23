@@ -52,6 +52,13 @@ BILIBILI_METADATA_FIELDS = (
     ("original_url", "ORIGINAL_URL"),
     ("canonical_url", "CANONICAL_URL"),
 )
+PROMPT_PROFILE_MAP = {
+    "default": "prompts/default.md",
+    "news_politics": "prompts/news_politics.md",
+    "tech_tutorial": "prompts/tech_tutorial.md",
+    "podcast": "prompts/podcast.md",
+    "cooking": "prompts/cooking.md",
+}
 ASR_PROMPT_LINES = (
     "请将这段中文视频音频转写为简体中文，尽量补齐标点。",
     "保留人名、地名、机构名、日期和数字。",
@@ -106,6 +113,12 @@ def parse_args():
         "--summarize-file",
         default=None,
         help="Summarize an existing TXT file with DeepSeek without downloading/transcribing",
+    )
+    parser.add_argument(
+        "--prompt-profile",
+        choices=["default", "news_politics", "tech_tutorial", "podcast", "cooking"],
+        default=None,
+        help="Prompt profile for DeepSeek summary",
     )
     parser.add_argument(
         "--download-only",
@@ -1423,6 +1436,17 @@ def load_prompt_file(prompt_path):
     return prompt_text
 
 
+def apply_prompt_profile(runtime_config, prompt_profile):
+    if prompt_profile:
+        runtime_config["deepseek_prompt_file"] = PROMPT_PROFILE_MAP[prompt_profile]
+        runtime_config["prompt_profile"] = prompt_profile
+    else:
+        if runtime_config.get("deepseek_prompt_file") == "prompts/news_analysis.md":
+            runtime_config["deepseek_prompt_file"] = PROMPT_PROFILE_MAP["default"]
+        runtime_config["prompt_profile"] = "config"
+    return runtime_config
+
+
 def preclean_transcript(text):
     cleaned = text.replace("\ufeff", "").replace("\x00", "")
     prompt_residue = set(ASR_PROMPT_LINES)
@@ -1557,6 +1581,8 @@ def summarize_txt_file(txt_path, runtime_config):
         raise RuntimeError(f"TXT file not found: {txt_file}")
 
     print(f"[summary] reading transcript from {txt_file}")
+    print(f"[summary] prompt profile: {runtime_config.get('prompt_profile', 'config')}")
+    print(f"[summary] prompt file: {runtime_config['deepseek_prompt_file']}")
     transcript_text = txt_file.read_text(encoding="utf-8")
     prompt_text = load_prompt_file(runtime_config["deepseek_prompt_file"])
     cleaned_text = preclean_transcript(transcript_text)
@@ -1613,6 +1639,7 @@ def emit_artifacts(
 def main():
     args = parse_args()
     runtime_config = load_runtime_config(args.keys_file)
+    apply_prompt_profile(runtime_config, args.prompt_profile)
     output_dir = get_output_dir(args.output_dir, runtime_config["output_dir"])
     if args.proxy_url is not None:
         runtime_config["proxy_url"] = args.proxy_url

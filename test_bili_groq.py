@@ -185,5 +185,52 @@ class PromptMigrationTests(unittest.TestCase):
         )
 
 
+class PromptProfileTests(unittest.TestCase):
+    def test_apply_prompt_profile_overrides_config_prompt_file(self):
+        runtime_config = {"deepseek_prompt_file": "prompts/default.md"}
+
+        bili_groq.apply_prompt_profile(runtime_config, "cooking")
+
+        self.assertEqual(runtime_config["deepseek_prompt_file"], "prompts/cooking.md")
+        self.assertEqual(runtime_config["prompt_profile"], "cooking")
+
+    def test_apply_prompt_profile_marks_config_when_profile_is_missing(self):
+        runtime_config = {"deepseek_prompt_file": "prompts/default.md"}
+
+        bili_groq.apply_prompt_profile(runtime_config, None)
+
+        self.assertEqual(runtime_config["deepseek_prompt_file"], "prompts/default.md")
+        self.assertEqual(runtime_config["prompt_profile"], "config")
+
+    def test_apply_prompt_profile_normalizes_legacy_config_prompt_to_default(self):
+        runtime_config = {"deepseek_prompt_file": "prompts/news_analysis.md"}
+
+        bili_groq.apply_prompt_profile(runtime_config, None)
+
+        self.assertEqual(runtime_config["deepseek_prompt_file"], "prompts/default.md")
+        self.assertEqual(runtime_config["prompt_profile"], "config")
+
+    def test_summarize_txt_file_logs_prompt_profile_and_prompt_file(self):
+        runtime_config = {
+            "deepseek_prompt_file": "prompts/news_politics.md",
+            "prompt_profile": "news_politics",
+        }
+        with TemporaryDirectory() as temp_dir:
+            txt_path = Path(temp_dir) / "sample.txt"
+            txt_path.write_text("transcript text", encoding="utf-8")
+
+            output = StringIO()
+            with patch.object(bili_groq, "load_prompt_file", return_value="prompt"), patch.object(
+                bili_groq, "call_deepseek_summary", return_value="summary"
+            ), patch.object(
+                bili_groq, "save_summary", return_value=Path(temp_dir) / "sample.summary.md"
+            ), redirect_stdout(output):
+                bili_groq.summarize_txt_file(txt_path, runtime_config)
+
+        log_text = output.getvalue()
+        self.assertIn("[summary] prompt profile: news_politics", log_text)
+        self.assertIn("[summary] prompt file: prompts/news_politics.md", log_text)
+
+
 if __name__ == "__main__":
     unittest.main()

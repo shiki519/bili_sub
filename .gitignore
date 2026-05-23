@@ -1,23 +1,42 @@
+# Python cache / env
 __pycache__/
 *.py[cod]
+.venv/
+venv/
+.env
 
+# Runtime task cache
 .current_task_url
 .current_task_title
-
-output/
-logs/
 temp_chunks/
 temp_sub*.srt
 temp_download.m4a
 temp_download.m4a.part
 temp_download.*
-bilibili.txt
 *.part
 *.opus
 *.opus.txt
 
+# Output / logs
+output/
+logs/
+*.log
+
+# Secrets
 keys.config
+bilibili.txt
+update_cookie_to_cloud.config
+font.ttf
+
+# Local helper cache
+.tmp_paramiko/
+
+# Local/reference source dump
 Bilibili-Obsidian-Clipper-main/
+
+# Generated files
+*.summary.md
+*.srt
 
 .DS_Store
 Thumbs.db

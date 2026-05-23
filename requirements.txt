@@ -1,4 +1,5 @@
 requests
+pyyaml
 yt-dlp
 opencc-python-reimplemented
 fpdf2

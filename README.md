@@ -7,13 +7,38 @@ Cross-platform Bilibili subtitle/transcript helper for Windows and Linux/cloud h
 - `bili_groq.py`: main workflow, downloads subtitles/audio, calls Groq Whisper, and can run DeepSeek summary.
 - `keys.config`: stores API keys and runtime options.
 - `txt2pdf.py`: optional TXT to PDF conversion.
-- `font.ttf`: font used by PDF export.
+- `font.ttf`: optional local font file for PDF export. It is intentionally not tracked in Git and should be deployed manually when needed.
 
 ## Optional launchers
 
 - `auto_sub.ps1`: Windows PowerShell launcher.
 - `auto_sub.sh`: Linux/cloud launcher.
 - `run_bili_sub.sh`: staged Linux/cloud wrapper for more stable retries and recovery.
+
+## Repository layout
+
+- `prompts/`: DeepSeek summary prompt profiles such as `default.md`, `news_politics.md`, `tech_tutorial.md`, `podcast.md`, and `cooking.md`.
+- `check_bili_updates/`: independent Bilibili UP update checker workflow.
+
+## check_bili_updates
+
+Run the update checker with:
+
+```powershell
+python .\check_bili_updates\check_bili_updates.py
+```
+
+Tracked files:
+
+- `check_bili_updates/check_bili_updates.py`
+- `check_bili_updates/up_list.yaml`
+- `check_bili_updates/SKILL.md`
+
+Runtime-only files that stay local:
+
+- `check_bili_updates/seen_videos.json`
+- `check_bili_updates/updates.md`
+- `check_bili_updates/bilibili.txt`
 
 ## keys.config format
 
