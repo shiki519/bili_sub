@@ -189,6 +189,13 @@ PDF_PATH="$(extract_result "RESULT_PDF")"
 SRT_PATH="$(extract_result "RESULT_SRT")"
 AUDIO_PATH="$(extract_result "RESULT_AUDIO")"
 TITLE="$(extract_result "RESULT_TITLE")"
+AUTHOR="$(extract_result "RESULT_AUTHOR")"
+BVID="$(extract_result "RESULT_BVID")"
+AID="$(extract_result "RESULT_AID")"
+CID="$(extract_result "RESULT_CID")"
+PAGE="$(extract_result "RESULT_PAGE")"
+ORIGINAL_URL="$(extract_result "RESULT_ORIGINAL_URL")"
+CANONICAL_URL="$(extract_result "RESULT_CANONICAL_URL")"
 
 if [[ -z "$TXT_PATH" ]]; then
   if [[ -z "$AUDIO_PATH" ]]; then
@@ -232,6 +239,30 @@ if [[ -z "$SUMMARY_PATH" ]]; then
   fail_stage "summary"
 fi
 
+if [[ -n "$TITLE" ]]; then
+  echo "RESULT_TITLE=${TITLE}"
+fi
+if [[ -n "$AUTHOR" ]]; then
+  echo "RESULT_AUTHOR=${AUTHOR}"
+fi
+if [[ -n "$BVID" ]]; then
+  echo "RESULT_BVID=${BVID}"
+fi
+if [[ -n "$AID" ]]; then
+  echo "RESULT_AID=${AID}"
+fi
+if [[ -n "$CID" ]]; then
+  echo "RESULT_CID=${CID}"
+fi
+if [[ -n "$PAGE" ]]; then
+  echo "RESULT_PAGE=${PAGE}"
+fi
+if [[ -n "$ORIGINAL_URL" ]]; then
+  echo "RESULT_ORIGINAL_URL=${ORIGINAL_URL}"
+fi
+if [[ -n "$CANONICAL_URL" ]]; then
+  echo "RESULT_CANONICAL_URL=${CANONICAL_URL}"
+fi
 echo "RESULT_TXT=${TXT_PATH}"
 if [[ -n "$SRT_PATH" ]]; then
   echo "RESULT_SRT=${SRT_PATH}"

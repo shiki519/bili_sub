@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qs, quote, urlparse
 from pathlib import Path
 
@@ -40,6 +41,17 @@ YTDLP_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 )
 YTDLP_REFERER = "https://www.bilibili.com/"
+BILIBILI_SHORT_DOMAINS = {"b23.tv", "bili2233.cn"}
+BILIBILI_METADATA_FIELDS = (
+    ("title", "TITLE"),
+    ("author", "AUTHOR"),
+    ("bvid", "BVID"),
+    ("aid", "AID"),
+    ("cid", "CID"),
+    ("page", "PAGE"),
+    ("original_url", "ORIGINAL_URL"),
+    ("canonical_url", "CANONICAL_URL"),
+)
 ASR_PROMPT_LINES = (
     "请将这段中文视频音频转写为简体中文，尽量补齐标点。",
     "保留人名、地名、机构名、日期和数字。",
@@ -147,7 +159,7 @@ def load_runtime_config(config_path):
         "deepseek_api_key": "",
         "deepseek_base_url": "https://api.deepseek.com",
         "deepseek_model": "deepseek-chat",
-        "deepseek_prompt_file": "prompts/news_analysis.md",
+        "deepseek_prompt_file": "prompts/default.md",
         "deepseek_retries": "3",
         "deepseek_timeout": "300",
         "bilibili_cookies": "",
@@ -550,6 +562,74 @@ def check_bilibili_login_status(runtime_config):
     }
 
 
+def ensure_url_has_scheme(url):
+    raw_url = StringOrEmpty(url)
+    if raw_url.startswith("//"):
+        return f"https:{raw_url}"
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw_url):
+        return raw_url
+    if re.match(r"^(b23\.tv|bili2233\.cn|(?:www\.|m\.)?bilibili\.com)(/|$)", raw_url, re.I):
+        return f"https://{raw_url}"
+    return raw_url
+
+
+def get_url_host(url):
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    return (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+
+
+def is_bilibili_short_url(url):
+    return get_url_host(ensure_url_has_scheme(url)) in BILIBILI_SHORT_DOMAINS
+
+
+def build_bilibili_video_canonical_url(url):
+    bvid, page_index = extract_bvid_and_page(url)
+    if not bvid:
+        return ""
+
+    canonical_url = f"https://www.bilibili.com/video/{bvid}/"
+    if page_index > 1:
+        canonical_url = f"{canonical_url}?p={page_index}"
+    return canonical_url
+
+
+def resolve_bilibili_canonical_url(url, runtime_config):
+    original_url = StringOrEmpty(url)
+    if not original_url:
+        return ""
+
+    normalized_url = ensure_url_has_scheme(original_url)
+    canonical_url = build_bilibili_video_canonical_url(normalized_url)
+    if canonical_url:
+        if canonical_url != normalized_url:
+            print(f"[bili] canonical URL: {canonical_url}")
+        return canonical_url
+
+    if not is_bilibili_short_url(normalized_url):
+        return normalized_url
+
+    ytdlp_proxy_url = runtime_config.get("ytdlp_proxy_url", "") or runtime_config.get("proxy_url", "")
+    proxies = {"http": ytdlp_proxy_url, "https": ytdlp_proxy_url} if ytdlp_proxy_url else None
+
+    try:
+        session = make_bilibili_session(runtime_config)
+        response = session.get(normalized_url, allow_redirects=True, timeout=20, proxies=proxies)
+        response.raise_for_status()
+        resolved_url = StringOrEmpty(response.url) or normalized_url
+        canonical_url = build_bilibili_video_canonical_url(resolved_url)
+        if canonical_url:
+            print(f"[bili] canonical URL: {canonical_url}")
+            return canonical_url
+        print(f"[warn] short URL resolved but no BVID was found: {resolved_url}")
+    except Exception as exc:
+        print(f"[warn] failed to resolve Bilibili short URL, continue with original: {exc}")
+
+    return normalized_url
+
+
 def extract_bvid_and_page(url):
     try:
         parsed = urlparse(url)
@@ -688,6 +768,58 @@ def resolve_cid_from_pages(view_info, page_index):
         }
 
     raise RuntimeError("Unable to resolve CID for the requested page.")
+
+
+def build_video_metadata(view_info, page_info, original_url, canonical_url):
+    return {
+        "title": StringOrEmpty(view_info.get("title") if isinstance(view_info, dict) else ""),
+        "author": StringOrEmpty(view_info.get("author") if isinstance(view_info, dict) else ""),
+        "bvid": StringOrEmpty(view_info.get("bvid") if isinstance(view_info, dict) else ""),
+        "aid": StringOrEmpty(view_info.get("aid") if isinstance(view_info, dict) else ""),
+        "cid": StringOrEmpty(page_info.get("cid") if isinstance(page_info, dict) else ""),
+        "page": StringOrEmpty(page_info.get("page") if isinstance(page_info, dict) else ""),
+        "original_url": StringOrEmpty(original_url),
+        "canonical_url": StringOrEmpty(canonical_url),
+    }
+
+
+def build_fallback_video_metadata(url, original_url):
+    bvid, page_index = extract_bvid_and_page(url)
+    canonical_url = build_bilibili_video_canonical_url(url) or StringOrEmpty(url)
+    return {
+        "title": "",
+        "author": "",
+        "bvid": StringOrEmpty(bvid),
+        "aid": "",
+        "cid": "",
+        "page": StringOrEmpty(page_index if bvid else ""),
+        "original_url": StringOrEmpty(original_url),
+        "canonical_url": StringOrEmpty(canonical_url),
+    }
+
+
+def load_bilibili_video_metadata(url, original_url, runtime_config):
+    fallback = build_fallback_video_metadata(url, original_url)
+    bvid, page_index = extract_bvid_and_page(url)
+    if not bvid:
+        return fallback
+
+    try:
+        view_info = fetch_bilibili_view_info(bvid, runtime_config)
+        page_info = resolve_cid_from_pages(view_info, page_index)
+        return build_video_metadata(view_info, page_info, original_url, url)
+    except Exception as exc:
+        print(f"[warn] failed to fetch Bilibili video metadata, continue with fallback: {exc}")
+        return fallback
+
+
+def merge_video_metadata(metadata, **overrides):
+    merged = dict(metadata or {})
+    for key, value in overrides.items():
+        normalized = StringOrEmpty(value)
+        if normalized:
+            merged[key] = normalized
+    return merged
 
 
 def normalize_subtitle_url(url):
@@ -916,13 +1048,14 @@ def get_bilibili_title_from_view(url, runtime_config):
         return ""
 
 
-def download_preferred_subtitle(url, runtime_config, output_dir, use_pdf=False):
+def download_preferred_subtitle(url, runtime_config, output_dir, use_pdf=False, original_url=""):
     bvid, page_index = extract_bvid_and_page(url)
     if not bvid:
         raise RuntimeError("Unable to parse BVID from URL.")
 
     view_info = fetch_bilibili_view_info(bvid, runtime_config)
     page_info = resolve_cid_from_pages(view_info, page_index)
+    video_metadata = build_video_metadata(view_info, page_info, original_url or url, url)
     cid = StringOrEmpty(page_info.get("cid"))
     if not cid:
         raise RuntimeError("Unable to resolve CID for the requested page.")
@@ -976,6 +1109,7 @@ def download_preferred_subtitle(url, runtime_config, output_dir, use_pdf=False):
                     "pdf_path": pdf_path,
                     "track": track,
                     "body": body,
+                    "metadata": video_metadata,
                 }
             except Exception as exc:
                 print(f"[warn] subtitle API track failed: {exc}")
@@ -998,6 +1132,7 @@ def download_preferred_subtitle(url, runtime_config, output_dir, use_pdf=False):
             "pdf_path": pdf_path,
             "track": None,
             "body": [],
+            "metadata": video_metadata,
         }
 
     return None
@@ -1265,13 +1400,22 @@ def transcribe_audio_file(audio_path, title, runtime_config, output_dir, clear_c
 
 
 def load_prompt_file(prompt_path):
+    raw_prompt_path = str(prompt_path or "").strip()
     prompt_file = Path(prompt_path).expanduser()
     if not prompt_file.is_absolute():
         prompt_file = SCRIPT_DIR / prompt_file
     prompt_file = prompt_file.resolve()
 
     if not prompt_file.exists():
-        raise RuntimeError(f"Prompt file not found: {prompt_file}")
+        if raw_prompt_path == "prompts/news_analysis.md":
+            fallback_prompt = (SCRIPT_DIR / "prompts" / "default.md").resolve()
+            if fallback_prompt.exists():
+                print("[prompt] legacy prompt not found, fallback to prompts/default.md")
+                prompt_file = fallback_prompt
+            else:
+                raise RuntimeError(f"Prompt file not found: {prompt_file}")
+        else:
+            raise RuntimeError(f"Prompt file not found: {prompt_file}")
 
     prompt_text = prompt_file.read_text(encoding="utf-8").strip()
     if not prompt_text:
@@ -1297,6 +1441,11 @@ def preclean_transcript(text):
     return "\n".join(kept_lines).strip()
 
 
+def get_beijing_date_context():
+    now = datetime.now(timezone(timedelta(hours=8)))
+    return now.strftime("当前日期：%Y年%m月%d日，北京时间。")
+
+
 def call_deepseek_summary(transcript_text, prompt_text, runtime_config):
     api_key = runtime_config["deepseek_api_key"]
     if not api_key:
@@ -1311,12 +1460,20 @@ def call_deepseek_summary(transcript_text, prompt_text, runtime_config):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    date_context = get_beijing_date_context()
+    system_content = (
+        date_context
+        + "\n"
+        + "判断过去、当前、未来时，必须以以上当前日期为准；不要根据模型自身知识截止时间判断当前年份。"
+        + "\n\n"
+        + prompt_text
+    )
     payload = {
         "model": runtime_config["deepseek_model"],
         "messages": [
             {
                 "role": "system",
-                "content": prompt_text,
+                "content": system_content,
             },
             {
                 "role": "user",
@@ -1334,6 +1491,7 @@ def call_deepseek_summary(transcript_text, prompt_text, runtime_config):
     for attempt in range(max_retries):
         attempt_number = attempt + 1
         print(f"[summary] DeepSeek attempt {attempt_number}/{max_retries}")
+        print(f"[summary] date context: {date_context}")
         print(
             f"[summary] sending transcript to DeepSeek model={runtime_config['deepseek_model']} "
             f"proxy={deepseek_proxy_url or 'direct'}"
@@ -1424,7 +1582,22 @@ def validate_dependencies_for_mode(
         resolve_ffmpeg_command()
 
 
-def emit_artifacts(txt_path=None, pdf_path=None, summary_path=None, audio_path=None, srt_path=None):
+def emit_video_metadata(metadata=None):
+    if not metadata:
+        return
+    for key, result_name in BILIBILI_METADATA_FIELDS:
+        emit_text_result(result_name, metadata.get(key, ""))
+
+
+def emit_artifacts(
+    txt_path=None,
+    pdf_path=None,
+    summary_path=None,
+    audio_path=None,
+    srt_path=None,
+    metadata=None,
+):
+    emit_video_metadata(metadata)
     if audio_path:
         emit_result("AUDIO", audio_path)
     if txt_path:
@@ -1496,9 +1669,11 @@ def main():
         )
         return 1
 
-    url = args.url or ""
+    original_url = StringOrEmpty(args.url or "")
+    url = resolve_bilibili_canonical_url(original_url, runtime_config)
     title = "Video_Result"
     generated_txt = None
+    video_metadata = build_fallback_video_metadata(url, original_url) if url else {}
 
     if url:
         check_task_consistency(url)
@@ -1509,6 +1684,8 @@ def main():
             will_download_audio=bool(url),
             will_transcribe=bool(not args.download_only and (url or TEMP_AUDIO.exists())),
         )
+        if url:
+            video_metadata = load_bilibili_video_metadata(url, original_url, runtime_config)
 
         if url and not args.skip_native_sub:
             try:
@@ -1517,6 +1694,7 @@ def main():
                     runtime_config,
                     output_dir,
                     use_pdf=args.pdf,
+                    original_url=original_url,
                 )
             except Exception as exc:
                 print(f"[warn] Bilibili API subtitle path failed, fallback to audio: {exc}")
@@ -1525,6 +1703,7 @@ def main():
                 generated_txt = subtitle_result["txt_path"]
                 srt_path = subtitle_result.get("srt_path")
                 pdf_path = subtitle_result["pdf_path"]
+                video_metadata = subtitle_result.get("metadata") or video_metadata
                 summary_path = None
                 if args.summarize and not args.download_only:
                     summary_path = summarize_txt_file(generated_txt, runtime_config)
@@ -1533,6 +1712,7 @@ def main():
                     srt_path=srt_path,
                     pdf_path=pdf_path,
                     summary_path=summary_path,
+                    metadata=video_metadata,
                 )
                 if not args.keep_temp:
                     wipe_cache("subtitle path finished")
@@ -1543,12 +1723,13 @@ def main():
                 raise RuntimeError("--download-only requires a Bilibili URL.")
             audio_path, title = download_audio(url, runtime_config)
             print(f"[download-only] audio ready for title: {title}")
-            emit_text_result("TITLE", title)
-            emit_artifacts(audio_path=audio_path)
+            video_metadata = merge_video_metadata(video_metadata, title=title)
+            emit_artifacts(audio_path=audio_path, metadata=video_metadata)
             return 0
 
         if url:
             _, title = download_audio(url, runtime_config)
+            video_metadata = merge_video_metadata(video_metadata, title=title)
         elif TEMP_AUDIO.exists():
             print("[step 2] using existing cached audio")
             title = load_saved_title() or load_cached_title(runtime_config)
@@ -1562,6 +1743,7 @@ def main():
             txt_path=generated_txt,
             pdf_path=pdf_path,
             summary_path=summary_path,
+            metadata=video_metadata,
         )
 
         if not args.keep_temp:

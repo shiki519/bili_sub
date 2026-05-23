@@ -19,7 +19,7 @@ DEEPSEEK_PROXY_URL=""
 DEEPSEEK_API_KEY="your_deepseek_api_key_here"
 DEEPSEEK_BASE_URL="https://api.deepseek.com"
 DEEPSEEK_MODEL="deepseek-chat"
-DEEPSEEK_PROMPT_FILE="prompts/news_analysis.md"
+DEEPSEEK_PROMPT_FILE="prompts/default.md"
 DEEPSEEK_RETRIES=3
 DEEPSEEK_TIMEOUT=300
 
